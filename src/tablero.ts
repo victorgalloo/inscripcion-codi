@@ -136,7 +136,18 @@ export class Tablero extends DurableObject<EnvPagos> {
   }
 
   async iniciar(escuela: string): Promise<EstadoTablero> {
-    const t: Guardado = { ...structuredClone(VACIO), escuela, leads: leadsDeEjemplo() };
+    // Reinicia el tablero de admisiones, pero conserva lo del modo «Cobrar a un contacto»:
+    // el Flow puede haberse pedido antes de que la página termine de iniciar la demo.
+    const previo = await this.leer();
+    const t: Guardado = {
+      ...structuredClone(VACIO),
+      escuela,
+      leads: leadsDeEjemplo(),
+      contactos: previo.contactos,
+      flowTokens: previo.flowTokens,
+      webhooks: previo.webhooks,
+      bitacora: previo.bitacora.filter((e) => e.tipo === "whatsapp" || e.tipo === "cobro"),
+    };
     await this.guardar(t);
     return this.publico(t);
   }
@@ -232,8 +243,9 @@ export class Tablero extends DurableObject<EnvPagos> {
   // ───────── modo «Cobrar a un contacto» (WhatsApp Flow) ─────────
 
   /** El bot mandó el mensaje de Flow con este flow_token (en producción: Cloud API, type "interactive"/"flow"). */
-  async emitirFlowToken(token: string): Promise<void> {
+  async emitirFlowToken(token: string, escuela: string): Promise<void> {
     const t = await this.leer();
+    t.escuela ||= escuela; // por si el Flow se pidió antes de iniciar la demo (la alarma borra tableros sin escuela)
     t.flowTokens[token] = "emitido";
     t.bitacora.push({ en: Date.now(), tipo: "whatsapp", texto: `WhatsApp · el bot mandó el Flow «Cobrar con CoDi» (flow_token …${token.slice(-6)})`, ok: true });
     await this.guardar(t);

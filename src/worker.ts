@@ -483,7 +483,7 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
     // interactive.type "flow", flow_id y este flow_token (dentro de la ventana de 24 h del chat).
     llavesFlow(env);
     const flowToken = nuevoFlowToken(escuela);
-    await t.emitirFlowToken(flowToken);
+    await t.emitirFlowToken(flowToken, escuela);
     return json({ flowToken });
   }
 
