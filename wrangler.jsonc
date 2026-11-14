@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "inscripcion-codi",
+  "account_id": "93695b987a7460c681c06ca4df901ef4",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-11-14",
+  "workers_dev": true,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "TABLERO", "class_name": "Tablero" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Tablero"] }],
+  "vars": {
+    // "mock" = CoDi simulado (demo pública). "pey" = API real de Pey (requiere secretos).
+    "PAGOS_PROVEEDOR": "mock"
+  }
+  // Secretos para modo "pey" (nunca en el repo):
+  //   npx wrangler secret put PEY_API_KEY
+  //   npx wrangler secret put PEY_WEBHOOK_SECRET
+}

@@ -1,0 +1,26 @@
+{
+  "name": "inscripcion-codi",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Inscripción con CoDi: la familia paga la inscripción del colegio con CoDi desde WhatsApp y el colegio la ve conciliada al instante en su CRM de admisiones.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "check": "npm run typecheck && npm test && wrangler deploy --dry-run --outdir .wrangler/dry"
+  },
+  "dependencies": {
+    "qrcode-generator": "^2.0.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261114.1",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.162.0"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}
