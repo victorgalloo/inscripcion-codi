@@ -42,6 +42,16 @@ test("Pey: crearCobroPush manda POST /codi/pn con el contrato de la OpenAPI", as
   assert.equal(c.expiraEn, 2800);
 });
 
+test("Pey: con la CLABE del colegio manda bankAccountId y nunca fee/applicationFee", async () => {
+  const { llamadas, fetcher } = fetchFalso({ transactionId: "01TX", codiId: "1" });
+  const pey = new PagosCoDiPey({ apiKey: "clave-de-prueba", cuentaColegio: "01CUENTACOLEGIO", fetcher });
+  await pey.crearCobroPush("0000000042", solicitud);
+  const cuerpo = JSON.parse(String(llamadas[0]!.init!.body));
+  assert.equal(cuerpo.bankAccountId, "01CUENTACOLEGIO");
+  assert.equal(cuerpo.amount, 4850);
+  assert.ok(!("fee" in cuerpo) && !("applicationFee" in cuerpo));
+});
+
 test("Pey: crearCobroQR manda POST /codi/qr y devuelve qrString", async () => {
   const { llamadas, fetcher } = fetchFalso({ id: "AB12CD34EF", qrString: "{}" }, 201);
   const pey = new PagosCoDiPey({ apiKey: "k", fetcher });

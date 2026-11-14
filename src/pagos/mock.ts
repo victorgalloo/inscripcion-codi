@@ -9,6 +9,7 @@
 import type {
   CobroPush,
   CobroQR,
+  EstadoCobro,
   EstadoTransaccion,
   PagoRecibido,
   PagosCoDi,
@@ -89,6 +90,17 @@ export class PagosCoDiMock implements PagosCoDi {
     const t = this.emitidos.get(id);
     if (!t) throw new Error("Transacción no encontrada (mock)");
     return { id, estado: t.pagadoEn ? "PAGADO" : "PENDIENTE", montoMXN: t.montoMXN, pagadoEn: t.pagadoEn };
+  }
+
+  /**
+   * Simula la consulta que haría Pey al vencer el cobro. Sin aceptación simulada
+   * en esta instancia responde PENDIENTE (lo mismo que Pey cuando la familia
+   * rechazó, pospuso o no vio el cobro: Pey no distingue esos casos).
+   */
+  async estadoCobro(cobro: { medio: "push" | "qr"; id: string }): Promise<EstadoCobro> {
+    const t = this.emitidos.get(cobro.id);
+    if (!t?.pagadoEn) return { estado: "PENDIENTE" };
+    return { estado: "PAGADO", transaccionId: cobro.id, montoMXN: t.montoMXN, pagadoEn: t.pagadoEn };
   }
 
   interpretarWebhook(payload: unknown): PagoRecibido {

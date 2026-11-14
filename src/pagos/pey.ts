@@ -4,23 +4,29 @@
  * Escrito contra la especificación OpenAPI publicada por Pey (versión 2026-10-20):
  *   POST /codi/pn            → Mensaje de Cobro push al celular (200: { transactionId, codiId })
  *   POST /codi/qr            → Mensaje de Cobro en QR           (201: { id, qrString, qrImage? })
- *   GET  /transaction/{id}   → estado PENDING | PAID
+ *   GET  /transaction/{id}   → estado PENDING | PAID (lo consultamos al vencer un push)
+ *   GET  /transaction/codi/qr/{id} → transacciones de un QR (lo consultamos al vencer un QR)
  *   Webhooks firmados con Standard Webhooks:
  *     codi.qr.payment_received · codi.pn.payment_received
  *
  * ESTADO: implementado y probado con un `fetch` falso (test/pey.test.ts).
  * Aún NO se ha ejecutado contra api.pey.mx con una API key real; Pey recomienda
  * probar en producción con montos de $0.01 MXN mientras sale su ambiente de pruebas.
+ *
+ * El cobro cae DIRECTO en la CLABE del colegio (`bankAccountId`, en estado ACTIVE en Pey);
+ * SuperLeads nunca recibe ni concentra fondos (Reglas del SPEI, regla 9a. Bis 1).
+ * No mandamos `fee` ni `applicationFee`: la familia paga exactamente el monto confirmado.
  */
 import type {
   CobroPush,
   CobroQR,
+  EstadoCobro,
   EstadoTransaccion,
   PagoRecibido,
   PagosCoDi,
   SolicitudCobro,
 } from "./tipos.ts";
-import { enmascararCelular, validarCelular, validarSolicitud } from "./tipos.ts";
+import { enmascararCelular, enmascararClabe, validarCelular, validarSolicitud } from "./tipos.ts";
 
 export const PEY_API_BASE = "https://api.pey.mx";
 
@@ -44,15 +50,19 @@ export class PagosCoDiPey implements PagosCoDi {
   private base: string;
   private fetcher: Fetcher;
   private ahora: () => number;
+  private cuentaColegio?: string;
 
   constructor(opciones: {
     apiKey: string;
+    /** `bankAccountId` (ULID) de la CLABE del colegio registrada en Pey. */
+    cuentaColegio?: string;
     base?: string;
     fetcher?: Fetcher;
     ahora?: () => number;
   }) {
     if (!opciones.apiKey) throw new Error("Falta PEY_API_KEY");
     this.apiKey = opciones.apiKey;
+    this.cuentaColegio = opciones.cuentaColegio || undefined;
     this.base = opciones.base ?? PEY_API_BASE;
     this.fetcher = opciones.fetcher ?? ((i, init) => fetch(i, init));
     this.ahora = opciones.ahora ?? (() => Math.floor(Date.now() / 1000));
@@ -66,6 +76,7 @@ export class PagosCoDiPey implements PagosCoDi {
       expiration: s.vigenciaSegundos,
       numRef: s.referencia,
       generateImage: false, // el QR lo dibujamos nosotros a partir de qrString (más rápido)
+      ...(this.cuentaColegio ? { bankAccountId: this.cuentaColegio } : {}),
       metadata: s.metadatos,
     });
     return {
@@ -88,6 +99,7 @@ export class PagosCoDiPey implements PagosCoDi {
       concept: s.concepto,
       expiration: s.vigenciaSegundos,
       numRef: s.referencia,
+      ...(this.cuentaColegio ? { bankAccountId: this.cuentaColegio } : {}),
       metadata: s.metadatos,
     });
     return {
@@ -112,6 +124,26 @@ export class PagosCoDiPey implements PagosCoDi {
       estado: r.status === "PAID" ? "PAGADO" : "PENDIENTE",
       montoMXN: r.amount,
       pagadoEn: r.datePaid,
+    };
+  }
+
+  async estadoCobro(cobro: { medio: "push" | "qr"; id: string }): Promise<EstadoCobro> {
+    type Tx = { id: string; status: "PENDING" | "PAID"; amount: number; datePaid?: number; metadata?: { trackingKey?: string } };
+    let tx: Tx | undefined;
+    if (cobro.medio === "push") {
+      tx = await this.llamar<Tx>("GET", `/transaction/${encodeURIComponent(cobro.id)}`);
+    } else {
+      // Un QR no es una transacción: se consultan las transacciones que lo pagaron.
+      const r = await this.llamar<{ items?: Tx[] }>("GET", `/transaction/codi/qr/${encodeURIComponent(cobro.id)}`);
+      tx = r.items?.find((t) => t.status === "PAID");
+    }
+    if (!tx || tx.status !== "PAID") return { estado: "PENDIENTE" };
+    return {
+      estado: "PAGADO",
+      transaccionId: tx.id,
+      montoMXN: tx.amount,
+      pagadoEn: tx.datePaid,
+      claveRastreo: tx.metadata?.trackingKey,
     };
   }
 
@@ -187,6 +219,7 @@ export function interpretarEventoPey(payload: unknown): PagoRecibido {
     concepto: e.concept ?? "",
     pagadoEn: e.datePaid ?? 0,
     claveRastreo: e.metadata?.trackingKey,
+    clabeOrdenante: enmascararClabe(e.metadata?.clabe),
     metadatos,
   };
 }

@@ -53,10 +53,42 @@ test("un webhook repetido no se aplica dos veces", () => {
   assert.equal(conciliar(una, pago, 2).resultado.tipo, "duplicado");
 });
 
-test("monto distinto manda a revisión, no a pagado", () => {
+test("monto distinto se rechaza: va a revisión, no a pagado", () => {
   const { leads, resultado } = conciliar([lead], { ...pago, montoMXN: 100, metadatos: { leadId: "lead-1" } }, 1);
-  assert.equal(resultado.tipo, "monto_distinto");
+  assert.equal(resultado.tipo, "no_coincide");
   assert.equal(leads[0]!.etapa, "revision");
+  assert.equal(leads[0]!.pago, undefined);
+  assert.match(leads[0]!.nota!, /monto distinto/);
+});
+
+test("referencia distinta se rechaza aunque el monto y el lead coincidan", () => {
+  const { leads, resultado } = conciliar([lead], { ...pago, referencia: "7654321", metadatos: { leadId: "lead-1" } }, 1);
+  assert.deepEqual(resultado, {
+    tipo: "no_coincide",
+    leadId: "lead-1",
+    motivo: "referencia distinta",
+    esperado: { montoMXN: 4850, referencia: "1234567" },
+    recibido: { montoMXN: 4850, referencia: "7654321" },
+  });
+  assert.equal(leads[0]!.etapa, "revision");
+});
+
+test("un pago tardío de un cobro sustituido no marca pagado", () => {
+  const conQR: Lead = {
+    ...lead,
+    cobro: { ...lead.cobro!, medio: "qr", id: "IDC-NUEVO", referencia: "2222222" },
+    cobrosAnteriores: [{ ...lead.cobro!, estado: "sustituido" }],
+  };
+  const r = conciliar([conQR], pago, 1); // llega el webhook del push viejo (01TX, ref 1234567)
+  assert.equal(r.resultado.tipo, "no_coincide");
+  assert.equal(r.leads[0]!.etapa, "revision");
+});
+
+test("al conciliar guarda el folio y la CLABE ya enmascarada", () => {
+  const l: Lead = { ...lead, cobro: { ...lead.cobro!, folioCodi: "12345678901234567890" } };
+  const p = conciliar([l], { ...pago, clabeOrdenante: "•••• •••• •••• ••0000" }, 1).leads[0]!.pago!;
+  assert.equal(p.folioCodi, "12345678901234567890");
+  assert.equal(p.clabeOrdenante, "•••• •••• •••• ••0000");
 });
 
 test("pago sin cobro conocido no toca nada", () => {
@@ -72,4 +104,11 @@ test("referencias de 7 dígitos sin repetir", () => {
   const r = nuevaReferencia([ya], azar);
   assert.match(r, /^[0-9]{7}$/);
   assert.notEqual(r, "1000000");
+});
+
+test("tampoco reutiliza la referencia de un cobro vencido", () => {
+  let n = 0;
+  const azar = () => [0.0, 0.5][n++ % 2]!;
+  const vencido: Lead = { ...lead, cobro: undefined, cobrosAnteriores: [{ ...lead.cobro!, referencia: "1000000", estado: "vencido_o_rechazado" }] };
+  assert.notEqual(nuevaReferencia([vencido], azar), "1000000");
 });

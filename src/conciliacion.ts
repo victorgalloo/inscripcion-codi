@@ -14,6 +14,15 @@ export const ETAPAS: { id: Etapa; nombre: string }[] = [
   { id: "pagado", nombre: "Inscrito · Pagado" },
 ];
 
+/**
+ * Estado de un Mensaje de Cobro desde el lado del colegio.
+ *   vigente               enviado y dentro de su vigencia
+ *   vencido_o_rechazado   llegó la vigencia sin pago (Pey no distingue rechazo de vencimiento)
+ *   sustituido            se mandó otro cobro nuevo en su lugar (p. ej. el QR de respaldo)
+ * Un cobro que no está vigente NUNCA se reutiliza: se genera uno nuevo, con folio y referencia nuevos.
+ */
+export type EstadoCobroActivo = "vigente" | "vencido_o_rechazado" | "sustituido";
+
 /** El Mensaje de Cobro vigente de un lead (push primero; QR si la familia lo pide). */
 export interface CobroActivo {
   medio: "push" | "qr";
@@ -28,6 +37,8 @@ export interface CobroActivo {
   referencia: string;
   expiraEn: number;
   creadoEn: number;
+  /** Ausente en datos viejos = vigente. */
+  estado?: EstadoCobroActivo;
 }
 
 export interface Lead {
@@ -38,6 +49,8 @@ export interface Lead {
   etapa: Etapa;
   demo?: boolean; // el lead que maneja quien prueba la demo
   cobro?: CobroActivo;
+  /** Cobros anteriores (vencidos o sustituidos), solo para auditoría. */
+  cobrosAnteriores?: CobroActivo[];
   pago?: {
     medio: "push" | "qr";
     transaccionId: string;
@@ -45,6 +58,10 @@ export interface Lead {
     comisionMXN: 0;
     pagadoEn: number;
     claveRastreo?: string;
+    /** Folio CoDi del cobro pagado (push) o IDC del QR. */
+    folioCodi?: string;
+    /** CLABE de origen enmascarada (nunca completa). */
+    clabeOrdenante?: string;
     conciliadoEn: number;
   };
   nota?: string;
@@ -53,7 +70,13 @@ export interface Lead {
 export type Resultado =
   | { tipo: "conciliado"; leadId: string }
   | { tipo: "duplicado"; leadId: string }
-  | { tipo: "monto_distinto"; leadId: string; esperado: number; recibido: number }
+  | {
+      tipo: "no_coincide";
+      leadId: string;
+      motivo: string;
+      esperado: { montoMXN: number; referencia: string };
+      recibido: { montoMXN: number; referencia: string };
+    }
   | { tipo: "sin_cobro" };
 
 const CENTAVO = 0.005;
@@ -69,9 +92,10 @@ export function conciliar(
   ahora: number,
 ): { leads: Lead[]; resultado: Resultado } {
   const conCobro = leads.filter((l) => l.cobro);
+  const ids = (l: Lead) => [l.cobro!, ...(l.cobrosAnteriores ?? [])].map((c) => c.id);
   const lead =
     conCobro.find((l) => l.id === pago.metadatos.leadId) ??
-    conCobro.find((l) => l.cobro!.id === pago.cobroId || l.cobro!.id === pago.transaccionId) ??
+    conCobro.find((l) => ids(l).includes(pago.cobroId ?? "") || ids(l).includes(pago.transaccionId)) ??
     conCobro.find(
       (l) => l.cobro!.referencia === pago.referencia && Math.abs(l.cobro!.montoMXN - pago.montoMXN) < CENTAVO,
     );
@@ -81,11 +105,32 @@ export function conciliar(
     return { leads, resultado: { tipo: "duplicado", leadId: lead.id } };
   }
 
-  const esperado = lead.cobro!.montoMXN;
-  const montoOk = Math.abs(esperado - pago.montoMXN) < CENTAVO;
+  // El pago debe ser idéntico al cobro que mandamos: mismo monto y misma referencia.
+  // Si no, NO se marca pagado ni se avisa al colegio como inscrito: va a revisión humana.
+  const cobro = lead.cobro!;
+  const esperado = { montoMXN: cobro.montoMXN, referencia: cobro.referencia };
+  const recibido = { montoMXN: pago.montoMXN, referencia: pago.referencia };
+  const motivos: string[] = [];
+  if (lead.etapa === "pagado") motivos.push("el lead ya estaba pagado");
+  if (Math.abs(esperado.montoMXN - recibido.montoMXN) >= CENTAVO) motivos.push("monto distinto");
+  if (esperado.referencia !== recibido.referencia) motivos.push("referencia distinta");
+
+  if (motivos.length) {
+    const motivo = motivos.join(" y ");
+    const actualizado: Lead = {
+      ...lead,
+      etapa: lead.etapa === "pagado" ? "pagado" : "revision",
+      nota: `Pago CoDi rechazado en conciliación (${motivo}): ${recibido.montoMXN} ref ${recibido.referencia} · esperado ${esperado.montoMXN} ref ${esperado.referencia}. Revisar o devolver desde el banco del colegio.`,
+    };
+    return {
+      leads: leads.map((l) => (l.id === lead.id ? actualizado : l)),
+      resultado: { tipo: "no_coincide", leadId: lead.id, motivo, esperado, recibido },
+    };
+  }
+
   const actualizado: Lead = {
     ...lead,
-    etapa: montoOk ? "pagado" : "revision",
+    etapa: "pagado",
     pago: {
       medio: pago.medio,
       transaccionId: pago.transaccionId,
@@ -93,21 +138,24 @@ export function conciliar(
       comisionMXN: 0,
       pagadoEn: pago.pagadoEn,
       claveRastreo: pago.claveRastreo,
+      folioCodi: cobro.folioCodi ?? cobro.id,
+      clabeOrdenante: pago.clabeOrdenante,
       conciliadoEn: ahora,
     },
-    nota: montoOk ? undefined : `Pagó ${pago.montoMXN} de ${esperado}: revisar`,
+    nota: undefined,
   };
   return {
     leads: leads.map((l) => (l.id === lead.id ? actualizado : l)),
-    resultado: montoOk
-      ? { tipo: "conciliado", leadId: lead.id }
-      : { tipo: "monto_distinto", leadId: lead.id, esperado, recibido: pago.montoMXN },
+    resultado: { tipo: "conciliado", leadId: lead.id },
   };
 }
 
 /** Referencia numérica CoDi de 7 dígitos que no choque con otra pendiente. */
 export function nuevaReferencia(leads: Lead[], azar: () => number = Math.random): string {
-  const usadas = new Set(leads.map((l) => l.cobro?.referencia));
+  // Incluye las de cobros vencidos o sustituidos: una referencia nunca se reutiliza.
+  const usadas = new Set(
+    leads.flatMap((l) => [l.cobro, ...(l.cobrosAnteriores ?? [])].map((c) => c?.referencia)),
+  );
   for (;;) {
     const r = String(1_000_000 + Math.floor(azar() * 9_000_000));
     if (!usadas.has(r)) return r;

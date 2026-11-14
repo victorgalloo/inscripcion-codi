@@ -30,7 +30,11 @@ export type Proveedor = "mock" | "pey";
 export interface SolicitudCobro {
   /** Monto, en pesos mexicanos (MXN). > 0 y <= 1,000,000. */
   montoMXN: number;
-  /** Concepto de pago que verá la familia en su app bancaria. */
+  /**
+   * Concepto de pago que verá la familia en su app bancaria: 1 a 40 caracteres
+   * (Circular 3/2012 de Banxico, art. 17 Ter, fracc. IX). Sale del catálogo de cuotas,
+   * nunca de lo que escribe la familia, y no lleva el nombre del menor (LFPDPPP).
+   */
   concepto: string;
   /** Referencia Numérica: 1 a 7 dígitos. Es la llave de conciliación. */
   referencia: string;
@@ -82,6 +86,8 @@ export interface PagoRecibido {
   pagadoEn: number;
   /** Clave de rastreo SPEI, si el proveedor la entrega. */
   claveRastreo?: string;
+  /** CLABE de la cuenta que pagó, YA enmascarada (nunca se guarda completa). */
+  clabeOrdenante?: string;
   /** Los metadatos que mandamos al crear el cobro. */
   metadatos: Record<string, string>;
 }
@@ -91,6 +97,16 @@ export interface EstadoTransaccion {
   estado: "PENDIENTE" | "PAGADO";
   montoMXN: number;
   pagadoEn?: number;
+}
+
+/** Estado de un Mensaje de Cobro (push o QR) consultado al proveedor. */
+export interface EstadoCobro {
+  estado: "PENDIENTE" | "PAGADO";
+  /** Transacción que lo pagó (si ya se pagó). */
+  transaccionId?: string;
+  montoMXN?: number;
+  pagadoEn?: number;
+  claveRastreo?: string;
 }
 
 export interface PagosCoDi {
@@ -104,6 +120,12 @@ export interface PagosCoDi {
   crearCobroQR(solicitud: SolicitudCobro): Promise<CobroQR>;
   /** Consulta el estado de una transacción (respaldo si no llega el webhook). */
   consultarTransaccion(id: string): Promise<EstadoTransaccion>;
+  /**
+   * Estado de un Mensaje de Cobro al vencer. Pey solo manda webhook cuando se paga
+   * (no cuando se rechaza o vence), así que al llegar la vigencia hay que preguntar.
+   * push → GET /transaction/{id} · QR → GET /transaction/codi/qr/{id}.
+   */
+  estadoCobro(cobro: { medio: "push" | "qr"; id: string }): Promise<EstadoCobro>;
   /** Convierte el cuerpo de un webhook (ya verificado) en un PagoRecibido. */
   interpretarWebhook(payload: unknown): PagoRecibido;
 }
@@ -122,8 +144,47 @@ export function validarSolicitud(s: SolicitudCobro): void {
   if (!Number.isInteger(s.vigenciaSegundos) || s.vigenciaSegundos < 360) {
     throw new Error("La vigencia mínima es de 360 segundos");
   }
-  if (!s.concepto.trim()) throw new Error("El concepto es obligatorio");
+  validarConcepto(s.concepto);
   if (Object.keys(s.metadatos).length > 50) throw new Error("Máximo 50 metadatos");
+}
+
+/** Concepto de pago: hasta 40 caracteres en la app móvil (Circular 3/2012, art. 17 Ter, fracc. IX). */
+export const CONCEPTO_MAX = 40;
+
+export function validarConcepto(concepto: string): void {
+  if (!concepto.trim()) throw new Error("El concepto es obligatorio");
+  if (concepto.length > CONCEPTO_MAX) throw new Error(`El concepto admite máximo ${CONCEPTO_MAX} caracteres`);
+}
+
+/** Vigencia que usa este proyecto: de 30 a 60 minutos (Pey acepta desde 360 s). */
+export const VIGENCIA_MIN_SEGUNDOS = 30 * 60;
+export const VIGENCIA_MAX_SEGUNDOS = 60 * 60;
+
+const sinAcentos = (s: string) => s.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+
+/**
+ * Reglas de negocio del cobro, encima de las de Pey (ver docs/regulacion.md):
+ *   - el monto es EXACTAMENTE el que la familia confirmó en el chat (sin recargo);
+ *   - la vigencia va de 30 a 60 min;
+ *   - el concepto no lleva datos personales (p. ej. el nombre del menor).
+ */
+export function validarPoliticaCobro(
+  s: SolicitudCobro,
+  opciones: { montoConfirmadoMXN: number; datosPrivados?: string[] },
+): void {
+  validarSolicitud(s);
+  if (!(Math.abs(s.montoMXN - opciones.montoConfirmadoMXN) < 0.005)) {
+    throw new Error("El monto del cobro debe ser igual al que confirmó la familia");
+  }
+  if (s.vigenciaSegundos < VIGENCIA_MIN_SEGUNDOS || s.vigenciaSegundos > VIGENCIA_MAX_SEGUNDOS) {
+    throw new Error("La vigencia debe ser de 30 a 60 minutos");
+  }
+  const concepto = sinAcentos(s.concepto);
+  for (const dato of opciones.datosPrivados ?? []) {
+    if (dato.trim().length >= 3 && concepto.includes(sinAcentos(dato.trim()))) {
+      throw new Error("El concepto no debe llevar datos personales (p. ej. el nombre del menor)");
+    }
+  }
 }
 
 export function validarCelular(celular: string): void {
@@ -132,4 +193,10 @@ export function validarCelular(celular: string): void {
 
 export function enmascararCelular(celular: string): string {
   return "•• •••• ••" + celular.slice(-2);
+}
+
+/** CLABE enmascarada: solo los últimos 4 dígitos (criterio de la CUB, art. 316 Bis 1). */
+export function enmascararClabe(clabe: string | undefined): string | undefined {
+  const d = (clabe ?? "").replace(/\D/g, "");
+  return d.length >= 4 ? "•••• •••• •••• ••" + d.slice(-4) : undefined;
 }

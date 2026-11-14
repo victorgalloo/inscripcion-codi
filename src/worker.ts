@@ -8,14 +8,19 @@
  *   POST /api/cobros               el agente manda el Mensaje de Cobro CoDi (push o QR)
  *   POST /api/demo/aceptar         SOLO MOCK: la familia toca «Aceptar» en su app bancaria;
  *                                  se emite un webhook firmado y se ENTREGA POR HTTP a /webhooks/codi
+ *   POST /api/demo/vencer          SOLO MOCK: adelanta el reloj del cobro y corre la revisión de
+ *                                  vencimiento (la misma que hace la alarma del Durable Object)
  *   POST /webhooks/codi            webhook real: verifica la firma (Standard Webhooks, HMAC-SHA256),
- *                                  concilia, mueve el lead a «Inscrito · Pagado» y avisa por ntfy
+ *                                  deduplica por webhook-id, compara monto + referencia con el cobro
+ *                                  original y SOLO entonces mueve a «Inscrito · Pagado» y avisa por ntfy
  */
 import { Tablero, type EstadoTablero } from "./tablero.ts";
 import { nuevaReferencia, type CobroActivo, type Lead } from "./conciliacion.ts";
 import { PagosCoDiMock } from "./pagos/mock.ts";
-import { PagosCoDiPey } from "./pagos/pey.ts";
-import type { PagoRecibido, PagosCoDi, SolicitudCobro } from "./pagos/tipos.ts";
+import { crearPagos } from "./pagos/fabrica.ts";
+import { validarPoliticaCobro, type PagoRecibido, type SolicitudCobro } from "./pagos/tipos.ts";
+import { estaVigente } from "./vencimiento.ts";
+import { AVISO_PRIVACIDAD, mensajeAntesDelCobro, pesos } from "./mensajes.ts";
 import { firmarWebhook, verificarWebhook } from "./webhooks.ts";
 import { publicarNtfy, type ResultadoNtfy } from "./ntfy.ts";
 import { qrSvg } from "./qr.ts";
@@ -34,6 +39,8 @@ export interface Env {
   // Secretos (wrangler secret put …). Nunca en el repo.
   CODI_WEBHOOK_SECRET?: string;
   PEY_API_KEY?: string;
+  /** bankAccountId (Pey) de la CLABE del colegio: el dinero cae directo ahí. */
+  PEY_BANK_ACCOUNT_ID?: string;
   NTFY_TOKEN?: string;
 }
 
@@ -46,10 +53,7 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
-function pagos(env: Env): PagosCoDi {
-  if (env.PAGOS_PROVEEDOR === "pey") return new PagosCoDiPey({ apiKey: env.PEY_API_KEY ?? "" });
-  return new PagosCoDiMock();
-}
+const pagos = crearPagos;
 
 function tablero(env: Env, escuela: string) {
   return env.TABLERO.get(env.TABLERO.idFromName(escuela));
@@ -77,9 +81,6 @@ class ErrorHttp extends Error {
   }
 }
 
-const pesos = (n: number) =>
-  n.toLocaleString("es-MX", { style: "currency", currency: "MXN", minimumFractionDigits: 2 });
-
 // ───────────────────────── webhook ─────────────────────────
 
 async function webhookCodi(req: Request, env: Env): Promise<Response> {
@@ -100,6 +101,7 @@ async function webhookCodi(req: Request, env: Env): Promise<Response> {
   const t = tablero(env, escuela);
   const { resultado, lead } = await t.aplicarPago(v.id, pago);
 
+  // ntfy SOLO si: firma ✓ (arriba), webhook-id nuevo, y monto + referencia iguales al cobro original.
   const avisos: ResultadoNtfy[] = [];
   if (resultado.tipo === "conciliado" && lead && env.NTFY_TEMA) {
     const origen = new URL(req.url).origin;
@@ -124,8 +126,10 @@ async function webhookCodi(req: Request, env: Env): Promise<Response> {
       await publicarNtfy(
         env.NTFY_TEMA,
         {
-          titulo: `Familia · ${ESCUELA_DEMO.nombre} recibió tu pago`,
-          mensaje: `Inscripción ${ESCUELA_DEMO.ciclo} · ${lead.grado} confirmada. ${pesos(pago.montoMXN)} · rastreo ${pago.claveRastreo ?? "—"}`,
+          titulo: `Familia · ${ESCUELA_DEMO.razonSocial} recibió tu pago`,
+          mensaje:
+            `Inscripción ${ESCUELA_DEMO.ciclo} · ${lead.grado} confirmada. ${pesos(pago.montoMXN)} sin comisión · ` +
+            `Folio CoDi ${lead.pago?.folioCodi ?? "—"} · rastreo ${pago.claveRastreo ?? "—"} · desde CLABE ${pago.clabeOrdenante ?? "—"}`,
           etiquetas: ["tada", "iphone"],
           liga: `${origen}/`,
           prioridad: 3,
@@ -175,6 +179,8 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
     return json({
       proveedor: env.PAGOS_PROVEEDOR,
       escuela: ESCUELA_DEMO,
+      cuota: CUOTA_INSCRIPCION,
+      avisoPrivacidad: AVISO_PRIVACIDAD,
       ntfy: ntfyUrl
         ? { tema: env.NTFY_TEMA, servidor: base, url: ntfyUrl, qr: qrSvg(ntfyUrl) }
         : null,
@@ -218,14 +224,28 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
     if (lead.etapa === "pagado") throw new ErrorHttp(409, "ya está pagado");
 
     const p = pagos(env);
+    // Antes de mandar otro cobro, confirma que el anterior no se haya pagado ya.
+    if (estaVigente(lead.cobro) && (await p.estadoCobro(lead.cobro)).estado === "PAGADO") {
+      throw new ErrorHttp(409, "el cobro anterior ya se pagó; espera la confirmación");
+    }
     const solicitud: SolicitudCobro = {
       montoMXN: CUOTA_INSCRIPCION.montoMXN,
       concepto: CUOTA_INSCRIPCION.concepto,
-      // Si ya hubo un cobro (p. ej. push rechazado), el QR conserva la misma referencia.
-      referencia: lead.cobro?.referencia ?? nuevaReferencia(leads),
+      // Cada Mensaje de Cobro es NUEVO: referencia nueva (y folio nuevo del proveedor).
+      // Un cobro vencido, rechazado o sustituido nunca se reutiliza.
+      referencia: nuevaReferencia(leads),
       vigenciaSegundos: VIGENCIA_SEGUNDOS,
       metadatos: { escuelaId: escuela, leadId },
     };
+    try {
+      validarPoliticaCobro(solicitud, {
+        // El monto que el agente le dijo a la familia y ella confirmó en el chat.
+        montoConfirmadoMXN: Number(body.montoConfirmadoMXN),
+        datosPrivados: [lead.familia],
+      });
+    } catch (e) {
+      throw new ErrorHttp(422, (e as Error).message);
+    }
     const ahora = Date.now();
     let cobro: CobroActivo;
     if (medio === "push") {
@@ -238,7 +258,9 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
     await t.guardarCobro(leadId, cobro);
     return json({
       cobro,
-      beneficiario: ESCUELA_DEMO.nombre,
+      beneficiario: ESCUELA_DEMO.razonSocial,
+      mensaje: mensajeAntesDelCobro(cobro, ESCUELA_DEMO.razonSocial),
+      avisoPrivacidad: AVISO_PRIVACIDAD,
       qrSvg: cobro.qrString ? qrSvg(cobro.qrString) : undefined,
     });
   }
@@ -248,8 +270,16 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
     if (!env.CODI_WEBHOOK_SECRET) throw new ErrorHttp(500, "CODI_WEBHOOK_SECRET no configurado");
     const { lead } = await t.lead(String(body.leadId ?? ""));
     if (!lead?.cobro) throw new ErrorHttp(404, "no hay cobro vigente");
+    if (!estaVigente(lead.cobro)) throw new ErrorHttp(409, "el cobro ya no está vigente");
     const evento = new PagosCoDiMock().simularAceptacion(lead.cobro, { escuelaId: escuela, leadId: lead.id });
     return json({ webhook: await entregarWebhook(env, url.origin, evento) });
+  }
+
+  if (ruta === "/api/demo/vencer") {
+    if (env.PAGOS_PROVEEDOR !== "mock") throw new ErrorHttp(403, "solo en modo mock");
+    const { lead } = await t.lead(String(body.leadId ?? ""));
+    if (!estaVigente(lead?.cobro)) throw new ErrorHttp(404, "no hay cobro vigente");
+    return json(await t.vencerAhora(lead!.id));
   }
 
   return json({ error: "No encontrado" }, 404);
