@@ -35,6 +35,7 @@
       </div>
       <div id="chat" class="chat"></div>
       <div id="respuestas" class="respuestas"></div>
+      <p class="privacidad" id="privacidad">Aviso de privacidad (demo): el celular del chat se comparte con el proveedor de pagos solo para enviar el cobro CoDi.</p>
 
       <!-- App bancaria simulada: notificación del Mensaje de Cobro CoDi -->
       <button id="banner" class="banner" hidden>
@@ -42,9 +43,13 @@
         <span id="banner-txt">Tienes un cobro pendiente</span>
       </button>
       <div id="hoja" class="hoja" hidden role="dialog" aria-label="Mensaje de Cobro CoDi">
-        <p class="banco">🏦 Tu banco · Mensaje de Cobro CoDi®</p>
+        <div class="hoja-top">
+          <span class="logo-codi" title="Aquí va el logo oficial de CoDi® (marca de Banxico); la app de tu banco lo muestra">logo CoDi®</span>
+          <p class="banco">Tu banco (simulado) · Mensaje de Cobro</p>
+        </div>
         <p class="monto" id="h-monto"></p>
         <dl>
+          <dt>Folio CoDi</dt><dd id="h-folio"></dd>
           <dt>Beneficiario</dt><dd id="h-benef"></dd>
           <dt>Concepto de pago</dt><dd id="h-concepto"></dd>
           <dt>Referencia numérica</dt><dd id="h-ref"></dd>
@@ -53,6 +58,7 @@
         </dl>
         <div class="acciones">
           <button id="h-rechazar" class="ghost">Rechazar</button>
+          <button id="h-posponer" class="ghost">Posponer</button>
           <button id="h-aceptar" class="primario">Aceptar</button>
         </div>
       </div>
@@ -72,6 +78,8 @@
   <footer>
     Código: <a href="https://github.com/victorgalloo/inscripcion-codi">github.com/victorgalloo/inscripcion-codi</a>
     · Hackatón México 2026 · SuperLeads · No es un cobro real
+    · El dinero va directo a la CLABE del colegio; SuperLeads no recibe fondos
+    · <a href="https://github.com/victorgalloo/inscripcion-codi/blob/main/docs/regulacion.md">Regulación CoDi</a>
   </footer>
   <script src="/app.js" type="module"></script>
 </body>
