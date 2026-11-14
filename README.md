@@ -7,6 +7,11 @@ Proyecto para el **Hackatón México 2026** (kickoff León), organizado por Spac
 ▶ **Demo en vivo:** https://inscripcion-codi.noisy-shape-4fc9.workers.dev
 (datos ficticios · CoDi simulado · no se mueve dinero)
 
+La demo tiene dos modos, en una sola pantalla:
+
+- **Inscripción**: la familia pide informes por WhatsApp y paga la inscripción con un push CoDi.
+- **Cobrar a un contacto** ([ir directo](https://inscripcion-codi.noisy-shape-4fc9.workers.dev/?modo=contacto)): el colegio o negocio llena un formulario **dentro de WhatsApp** (WhatsApp Flow): monto, concepto, contacto y vigencia. Al contacto le llega el cobro CoDi a la app de su banco, con todo prellenado, y paga con un solo botón. Ver [Cobrar a un contacto desde WhatsApp](#cobrar-a-un-contacto-desde-whatsapp).
+
 **El dinero va directo a la CLABE del colegio.** SuperLeads orquesta la conversación y el CRM, pero nunca recibe ni concentra fondos (Reglas del SPEI de Banxico, regla 9a. Bis 1). SuperLeads no es participante del SPEI: los participantes son los bancos. Qué dice la regulación de CoDi y cómo la aplica la demo: [docs/regulacion.md](docs/regulacion.md).
 
 > **Aviso de privacidad (demo):** el celular de la familia, el mismo del chat, se comparte con el proveedor de pagos (Pey) solo para enviarle el cobro CoDi. En producción, el aviso de privacidad del colegio y el de SuperLeads lo cubren (LFPDPPP).
@@ -81,6 +86,99 @@ sequenceDiagram
   Note over T: El navegador consulta el tablero cada 1.5 s.<br/>La tarjeta se mueve sola; el navegador nunca marca el pago.
 ```
 
+## Cobrar a un contacto desde WhatsApp
+
+**La idea:** el cobro sale de la conversación de WhatsApp y llega como **notificación push** a la app bancaria del contacto. Al abrirla, CoDi ya trae todo prellenado (beneficiario, monto, concepto, referencia y vigencia) y solo queda un botón: **Pagar**. Quien cobró recibe el aviso en el mismo chat y por ntfy.
+
+1. Alguien de caja le escribe al bot de cobros del colegio, que le manda un **WhatsApp Flow** «Cobrar con CoDi» con un `flow_token` nuevo. Su Flow JSON está en [docs/whatsapp-flow.json](docs/whatsapp-flow.json).
+2. El formulario pide **Monto**, **Concepto** (40 caracteres o menos, con contador), **Contacto** (de la lista o un celular de 10 dígitos) y **Vigencia** (30 o 60 min).
+3. Al enviarlo, WhatsApp hace un `data_exchange` a **`POST /webhooks/whatsapp-flow`**, cifrado y firmado como lo hace Meta. El Worker verifica la firma, descifra y valida. Si algo está mal, regresa la misma pantalla con `error_message` y el formulario lo muestra. Si todo está bien, llama a `PagosCoDi.crearCobroPush(celular, { monto, concepto, referencia, vigencia })`.
+4. Al celular del contacto le llega **«Cobro CoDi · Colegio Aurora, S.C. (demo) · $350.50»** con *Aceptar / Rechazar / Posponer*. Al tocarla se abre la app del banco con el cobro prellenado y el botón **Pagar**.
+5. El pago dispara el **webhook firmado** `codi.pn.payment_received` a `/webhooks/codi`. Pasa por la misma verificación, la misma idempotencia y la misma comparación de monto y referencia contra el cobro original que la inscripción.
+6. El chat de quien cobró recibe **«✅ Mariana López (demo) pagó $350.50 · Folio CoDi …»** y sale un **push de ntfy**.
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor Caja as Caja del colegio (WhatsApp)
+  participant WA as WhatsApp (Cloud API · Flow)
+  participant W as Worker
+  participant P as Pey / CoDi (Banxico)
+  actor C as Contacto (app bancaria)
+  participant N as ntfy
+
+  Caja->>WA: «Cobrar a un contacto»
+  WA->>Caja: Mensaje de Flow «Cobrar con CoDi» (flow_token)
+  Caja->>WA: Monto · Concepto ≤ 40 · Contacto · Vigencia 30/60
+  WA->>W: POST /webhooks/whatsapp-flow<br/>X-Hub-Signature-256 · RSA-OAEP + AES-GCM
+  W->>W: Firma ✓ · descifra · flow_token sin usar · valida
+  W->>P: crearCobroPush(celular, monto, concepto, referencia)<br/>(Pey: POST /codi/pn)
+  W-->>WA: SUCCESS (respuesta cifrada, IV invertido)
+  WA-->>Caja: «📤 Mandé el cobro a Mariana…»
+  P->>C: Push «Cobro CoDi · beneficiario · $X»<br/>Aceptar / Rechazar / Posponer
+  C->>P: Abre la app → todo prellenado → Pagar
+  P->>W: POST /webhooks/codi (codi.pn.payment_received, Standard Webhooks)
+  W->>W: Firma ✓ · webhook-id nuevo · monto y ref = cobro original
+  W->>WA: «✅ Pagó $X · Folio CoDi …» (al chat de caja)
+  W->>N: push a quien cobró
+```
+
+### Por qué importa
+
+- **WhatsApp Pay no existe en México.** El FAQ de WhatsApp solo lista India y Brasil (pagos entre personas y a negocios) y Singapur (solo a negocios). CoDi llena ese hueco con el SPEI de Banxico: 24x7, en segundos y directo a la CLABE.
+- **Comisión de $0 en la transferencia CoDi**, contra lo que suele costar cobrar con tarjeta en México: Victor calcula 3.5–4.5 % por cobro. Es una cifra típica de mercado que **no verificamos**; varía según el adquirente y el plan, y no incluye IVA. Hoy la API de Pey es gratis «por el momento» ([docs/procesador-pagos.md](docs/procesador-pagos.md)).
+- **Sin copiar CLABEs ni mandar comprobantes:** el contacto no captura nada, y quien cobra no cuadra fotos de transferencias a mano. La referencia numérica concilia sola.
+
+### Condiciones reales (también en la pantalla)
+
+- **El contacto necesita CoDi activado en su banco con ese celular.** Si no lo tiene, el respaldo es un **QR o liga de pago en el mismo chat de WhatsApp**. Pey hoy no da un error claro cuando el celular no tiene CoDi.
+- **Quien cobra registra su CLABE con el proveedor.** En Pey, el registro con Banxico tarda **hasta 5 días hábiles** (la cuenta debe estar `ACTIVE`). Por eso este modo es para **negocios y colegios que cobran a cualquier contacto**, no para P2P entre personas.
+- **El dinero va directo a la CLABE del beneficiario.** Ni SuperLeads ni el bot concentran fondos (Reglas del SPEI, regla 9a. Bis 1; ver [docs/regulacion.md](docs/regulacion.md)).
+- **Los mensajes que inicia el negocio necesitan plantillas aprobadas** por Meta. Fuera de la ventana de 24 h del chat, avisarle al contacto (o mandarle el QR o la liga) va por plantilla. El aviso «✅ Pagó» a caja va dentro de la ventana, porque caja acaba de escribir.
+- **Los WhatsApp Flows requieren la WhatsApp Business Platform (Cloud API):** una app de Meta, un número de WhatsApp Business y un Flow publicado con su endpoint. No funcionan con la app WhatsApp Business del celular.
+
+### El endpoint `POST /webhooks/whatsapp-flow`
+
+Sigue la forma que documenta Meta para endpoints de Flows ([guía](https://developers.facebook.com/docs/whatsapp/flows/guides/implementingyourflowendpoint), `data_api_version` 3.0):
+
+| Paso | Qué hace |
+|---|---|
+| Firma | `X-Hub-Signature-256: sha256=<hex HMAC-SHA256(app secret, cuerpo)>`. Si no coincide → **432** |
+| Cuerpo | `{ encrypted_flow_data, encrypted_aes_key, initial_vector }` |
+| Descifrado | La llave AES-128 viene cifrada con **RSA-OAEP (SHA-256)** con la **llave pública del negocio** (el negocio la sube a Meta). Los datos van en **AES-128-GCM** con la etiqueta de 16 bytes al final. Si no se puede descifrar → **421** (WhatsApp vuelve a bajar la llave) |
+| Acciones | `ping` → `{status: "active"}` · aviso de error → `{acknowledged: true}` · `INIT` → pantalla `COBRO` con contactos y vigencias · `data_exchange` → valida y crea el cobro |
+| flow_token | Lo genera el negocio al mandar el Flow. Un token = un cobro: si se reenvía el formulario → **427** «Este cobro ya se envió» (no cobra dos veces) |
+| Respuesta | JSON cifrado con la misma llave AES y el **IV invertido** (XOR 0xFF), en base64, `text/plain`. Al final, `SUCCESS` con `extension_message_response.params` |
+
+Debe responder en menos de 10 s (límite de WhatsApp), así que el push a Pey entra en esa misma solicitud.
+
+**Qué es real y qué es simulado en este modo:**
+
+| Pieza | Estado |
+|---|---|
+| Firma `X-Hub-Signature-256`, cifrado RSA-OAEP + AES-GCM, IV invertido y códigos 421, 427 y 432 | **Real**, con WebCrypto. Las pruebas lo cruzan contra `node:crypto`, como el ejemplo de Node de Meta |
+| Validación del formulario (monto, concepto ≤ 40, celular de 10 dígitos, vigencia 30/60) y un cobro por `flow_token` | **Real** |
+| Push CoDi, webhook de pago, conciliación, vencimiento y ntfy | Los mismos de la inscripción (mock de CoDi; webhook, conciliación y ntfy reales) |
+| **Lado de Meta** | **Simulado.** No hay app de Meta, número de WhatsApp Business ni Flow publicado. `POST /api/demo/flow` hace de cliente de WhatsApp: cifra con la llave pública de la demo, firma con un app secret de demo y entrega por HTTP real (*service binding*) a `/webhooks/whatsapp-flow`. El formulario, el chat y el celular del contacto se dibujan en el navegador |
+| Llave RSA y app secret | **De demo**, guardados como secretos del Worker. No están registrados en Meta |
+| Contactos | **Ficticios.** En la demo solo se aceptan celulares que empiezan con `0000` (ningún celular mexicano real empieza así) y el monto tope es $12,000 |
+
+Prueba el endpoint como lo haría Meta (cifra con la llave pública que publica el Worker y firma con el app secret, que se lee solo del entorno):
+
+```bash
+WA_APP_SECRET=… node scripts/enviar-flow.mjs --url http://localhost:8787            # ping → {"data":{"status":"active"}}
+WA_APP_SECRET=… node scripts/enviar-flow.mjs --url http://localhost:8787 --firma-mala # → 432
+```
+
+**Para encenderlo con Meta:**
+
+1. Genera la llave en PKCS#8 con `openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out privada.pem` y guárdala con `npx wrangler secret put WA_FLOW_PRIVATE_KEY < privada.pem`. Su pública está en `GET /api/whatsapp-flow/llave-publica`.
+2. Sube la pública a Meta con `POST /{phone-number-id}/whatsapp_business_encryption`.
+3. Guarda el app secret de tu app de Meta con `npx wrangler secret put WA_APP_SECRET`.
+4. Crea el Flow con [docs/whatsapp-flow.json](docs/whatsapp-flow.json) y apunta su endpoint a `https://<worker>/webhooks/whatsapp-flow`.
+5. Manda el Flow con Cloud API: `type: "interactive"`, `interactive.type: "flow"`, con `flow_id`, un `flow_token` de `nuevoFlowToken()` y `flow_action: "data_exchange"`.
+6. Quita el filtro de números `0000` (`soloFicticios`) y usa `PAGOS_PROVEEDOR = "pey"`.
+
 ## Prueba la demo en 30 segundos
 
 1. Abre https://inscripcion-codi.noisy-shape-4fc9.workers.dev
@@ -90,6 +188,7 @@ sequenceDiagram
 
 3. En el chat, toca las respuestas de la familia. Cuando aparezca la notificación del banco, ábrela y toca **Aceptar**. Con **Rechazar** verás el respaldo por QR. Con **(Demo) No contesto y pasan los 30 min** verás el vencimiento y un cobro nuevo.
 4. La tarjeta pasa a **Inscrito · Pagado**, la bitácora muestra `webhook … firma ✓` y `ntfy … HTTP 200`, y el push llega a tu celular.
+5. Arriba, cambia a **Cobrar a un contacto**. Toca **Cobrar a un contacto** y luego **📋 Cobrar con CoDi**. Llena el formulario, elige a Mariana y toca **Enviar cobro**. En el celular de la derecha toca la notificación del banco y luego **Pagar**. El chat dice **«✅ … pagó»** y llega el push de ntfy.
 
 > El tema de ntfy de la demo es **público**: cualquiera que lo conozca recibe los avisos, que solo traen datos ficticios. En producción se usaría un tema privado por colegio con token de acceso (`NTFY_TOKEN`).
 
@@ -115,7 +214,9 @@ sequenceDiagram
 
 ```
 public/                     Una sola pantalla: WhatsApp + app bancaria + tablero (HTML/CSS/JS sin framework)
-src/worker.ts               Rutas /api/* y /webhooks/codi
+public/contacto.js          Modo «Cobrar a un contacto»: WhatsApp Flow, celular del contacto y avisos
+src/worker.ts               Rutas /api/*, /webhooks/codi y /webhooks/whatsapp-flow
+src/whatsapp-flow.ts        Endpoint de WhatsApp Flows: firma de Meta, RSA-OAEP + AES-GCM, formulario de cobro
 src/pagos/tipos.ts          Interfaz PagosCoDi + validaciones CoDi y política del cobro
 src/pagos/mock.ts           CoDi simulado (emite webhooks con la misma forma que Pey)
 src/pagos/pey.ts            Cliente de la API de Pey (api.pey.mx)
@@ -127,7 +228,9 @@ src/conciliacion.ts         Lógica pura de conciliación
 src/tablero.ts              Durable Object: CRM de admisiones por escuela
 src/ntfy.ts                 Publicación de avisos push
 scripts/enviar-webhook.mjs  Manda un webhook firmado para probar
-test/                       44 pruebas (node --test)
+scripts/enviar-flow.mjs     Manda un data_exchange de WhatsApp Flow cifrado y firmado, como Meta
+test/                       59 pruebas (node --test)
+docs/whatsapp-flow.json     Flow JSON de «Cobrar con CoDi»
 docs/regulacion.md          Regulación CoDi (Banxico, CNBV, LFPDPPP) y cómo la aplica la demo
 ```
 
@@ -202,10 +305,12 @@ Requiere Node 22.18+ (las pruebas usan `node --test` con TypeScript nativo).
 npm ci
 # secreto local (el archivo está en .gitignore)
 node -e "console.log('CODI_WEBHOOK_SECRET=whsec_'+require('crypto').randomBytes(32).toString('base64'))" > .dev.vars
+# modo «Cobrar a un contacto»: llave RSA (PKCS#8 en base64, una línea) y app secret de demo
+node -e "const c=require('crypto');const k=c.generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'der'});console.log('WA_FLOW_PRIVATE_KEY='+k.toString('base64')+'\nWA_APP_SECRET='+c.randomBytes(24).toString('hex'))" >> .dev.vars
 npm run dev          # http://localhost:8787
-npm test             # 44 pruebas: firmas, conciliación, vencimiento, política del cobro, contrato de Pey, mock, ntfy
+npm test             # 59 pruebas: firmas, conciliación, vencimiento, política del cobro, contrato de Pey, mock, ntfy, WhatsApp Flow
 npm run typecheck
-npx wrangler deploy  # y luego: npx wrangler secret put CODI_WEBHOOK_SECRET
+npx wrangler deploy  # y luego: npx wrangler secret put CODI_WEBHOOK_SECRET (y WA_FLOW_PRIVATE_KEY, WA_APP_SECRET)
 ```
 
 ## Ruta a la API real de Pey
@@ -244,7 +349,8 @@ Qué cubre Pey como procesador, qué le falta (reembolsos, recurrentes, tarjeta 
 - **Primary flow:** the agent sends a CoDi **push payment request** to the family's phone (it already has the number from the chat). The family taps *Accept* in their banking app. A **signed webhook** then hits `POST /webhooks/codi` (Standard Webhooks, HMAC-SHA256, the same scheme Pey uses). The Worker reconciles the payment, the lead moves to *Enrolled · Paid*, and **ntfy** pushes a notification to the school; the family's notification is simulated.
 - **Fallback:** the same charge as a CoDi QR code.
 - **Compliance by design:** money goes straight to the school's CLABE and SuperLeads never holds funds. Each charge is validated before it is sent: concept of 40 characters or fewer, reference of up to 7 digits, 30–60 min expiry, and an amount equal to the one the family confirmed. An expired charge is never reused. At expiry, the Worker polls Pey's transaction endpoint. A webhook only triggers the school's notification after its signature is verified, its id is deduplicated, and its amount and reference match the original charge. See [docs/regulacion.md](docs/regulacion.md) (Spanish).
-- **Stack:** Cloudflare Workers + Durable Objects + static assets, TypeScript, no frontend framework, 44 tests.
+- **Second mode, "Charge a contact":** a school or business fills a **WhatsApp Flow** form inside WhatsApp (amount, concept of 40 characters or fewer, contact, 30 or 60 min expiry). The Flow's `data_exchange` request hits `POST /webhooks/whatsapp-flow`. The Worker checks Meta's `X-Hub-Signature-256` signature and decrypts the payload (RSA-OAEP-256 + AES-128-GCM, the response encrypted with the flipped IV; it returns 421, 427 and 432 as Meta expects). It validates the form and sends a CoDi **push** to the contact's phone. The contact taps the bank notification, finds every field prefilled and taps **Pay**. The signed payment webhook then reconciles the charge and notifies the sender in WhatsApp and by ntfy. The Meta side is **simulated**: there is no Meta app, and the Worker plays the WhatsApp client with a demo key. Real-world constraints apply. The payer needs CoDi enabled for that phone number at their bank; the fallback is a QR code or link in the same chat. The charging business must register its CLABE with the provider (up to 5 business days at Pey), so this is business-to-anyone, not P2P. Money goes straight to the beneficiary's CLABE. WhatsApp Pay is not available in Mexico. Business-initiated messages need approved templates, and Flows need the WhatsApp Business Platform (Cloud API). CoDi transfers carry no fee; Victor puts typical card fees at about 3.5–4.5%, a market figure we have not verified.
+- **Stack:** Cloudflare Workers + Durable Objects + static assets, TypeScript, no frontend framework, 59 tests.
 - **Mocked:** the CoDi charge, the bank app and the WhatsApp conversation. **Real:** webhook verification, reconciliation, state and the ntfy push. A `PagosCoDiPey` adapter is written against Pey's public OpenAPI but has not yet been run with a live API key.
 - **Live demo:** https://inscripcion-codi.noisy-shape-4fc9.workers.dev. To get the push live, subscribe in the ntfy app to topic `inscripcion-codi-vmjgfbix3cnxl74b` on server `https://ntfy.envs.net`. ntfy.sh does not answer requests from Cloudflare Workers, so the demo uses that server instead.
 
