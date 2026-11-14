@@ -99,7 +99,7 @@ async function arrancar() {
   );
   respuestas([["Cobrar a un contacto", pedirFlow]]);
   setInterval(refrescar, 1500);
-  setInterval(() => ($("#r-reloj").textContent = hora()), 10_000);
+  setInterval(() => ($("#r-reloj").textContent = hora()), 2000);
   $("#r-reloj").textContent = hora();
   refrescar();
 }
