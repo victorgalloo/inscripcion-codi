@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Inscripción con CoDi · demo</title>
+  <meta name="description" content="La familia paga la inscripción con CoDi desde WhatsApp y el colegio la ve conciliada al instante en su CRM. Demo con datos ficticios." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>✓</text></svg>" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header>
+    <div>
+      <strong>Inscripción con CoDi</strong>
+      <span class="sub">Demo · datos ficticios · <span id="proveedor">CoDi simulado</span></span>
+    </div>
+    <nav>
+      <button id="btn-ntfy" class="ghost" aria-expanded="false">📲 Recibe el aviso en tu celular</button>
+      <button id="btn-reiniciar" class="ghost">Reiniciar</button>
+    </nav>
+    <div id="ntfy" class="pop" hidden>
+      <div id="ntfy-qr"></div>
+      <p>Instala <b>ntfy</b> (iOS / Android), toca <b>+</b> y suscríbete al tema:</p>
+      <code id="ntfy-tema"></code>
+      <p class="muted">Al aceptar el pago te llegan dos push: el del colegio y el de la familia.</p>
+    </div>
+  </header>
+
+  <main>
+    <section class="telefono" aria-label="Conversación de WhatsApp (simulada)">
+      <div class="chat-top">
+        <div class="avatar">A</div>
+        <div><b>Colegio Aurora (demo)</b><small>Asistente de admisiones · WhatsApp simulado</small></div>
+      </div>
+      <div id="chat" class="chat"></div>
+      <div id="respuestas" class="respuestas"></div>
+
+      <!-- App bancaria simulada: notificación del Mensaje de Cobro CoDi -->
+      <button id="banner" class="banner" hidden>
+        <span class="banco">🏦 Tu banco · CoDi®</span>
+        <span id="banner-txt">Tienes un cobro pendiente</span>
+      </button>
+      <div id="hoja" class="hoja" hidden role="dialog" aria-label="Mensaje de Cobro CoDi">
+        <p class="banco">🏦 Tu banco · Mensaje de Cobro CoDi®</p>
+        <p class="monto" id="h-monto"></p>
+        <dl>
+          <dt>Beneficiario</dt><dd id="h-benef"></dd>
+          <dt>Concepto de pago</dt><dd id="h-concepto"></dd>
+          <dt>Referencia numérica</dt><dd id="h-ref"></dd>
+          <dt>Vigencia</dt><dd id="h-vig"></dd>
+          <dt>Comisión</dt><dd>$0.00</dd>
+        </dl>
+        <div class="acciones">
+          <button id="h-rechazar" class="ghost">Rechazar</button>
+          <button id="h-aceptar" class="primario">Aceptar</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="crm" aria-label="Tablero de admisiones del colegio">
+      <div class="crm-top">
+        <b>Admisiones · Colegio Aurora (demo)</b>
+        <small id="vivo">● en vivo</small>
+      </div>
+      <div id="tablero" class="tablero"></div>
+      <ol id="bitacora" class="bitacora" aria-label="Eventos"></ol>
+    </section>
+  </main>
+
+  <footer>
+    Código: <a href="https://github.com/victorgalloo/inscripcion-codi">github.com/victorgalloo/inscripcion-codi</a>
+    · Hackatón México 2026 · SuperLeads · No es un cobro real
+  </footer>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>
