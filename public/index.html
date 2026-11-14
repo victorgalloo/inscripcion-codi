@@ -14,6 +14,10 @@
       <strong>Inscripción con CoDi</strong>
       <span class="sub">Demo · datos ficticios · <span id="proveedor">CoDi simulado</span></span>
     </div>
+    <div class="modos" role="tablist" aria-label="Modo de la demo">
+      <button role="tab" id="tab-inscripcion" aria-selected="true">Inscripción</button>
+      <button role="tab" id="tab-contacto" aria-selected="false">Cobrar a un contacto</button>
+    </div>
     <nav>
       <button id="btn-ntfy" class="ghost" aria-expanded="false">📲 Recibe el aviso en tu celular</button>
       <button id="btn-reiniciar" class="ghost">Reiniciar</button>
@@ -27,7 +31,7 @@
     </div>
   </header>
 
-  <main>
+  <main id="modo-inscripcion">
     <section class="telefono" aria-label="Conversación de WhatsApp (simulada)">
       <div class="chat-top">
         <div class="avatar">A</div>
@@ -75,6 +79,98 @@
     </section>
   </main>
 
+  <!-- Modo «Cobrar a un contacto»: WhatsApp Flow → endpoint → push CoDi al celular del contacto -->
+  <main id="modo-contacto" class="contacto" hidden>
+    <section class="telefono" aria-label="WhatsApp de quien cobra (simulado)">
+      <div class="chat-top">
+        <div class="avatar">$</div>
+        <div><b>Cobros CoDi · Colegio Aurora</b><small>Bot de WhatsApp del colegio · tú eres caja</small></div>
+      </div>
+      <div id="c-chat" class="chat"></div>
+      <div id="c-respuestas" class="respuestas"></div>
+
+      <!-- WhatsApp Flow (simulado; su Flow JSON real está en docs/whatsapp-flow.json) -->
+      <form id="flow" class="flow" hidden novalidate aria-label="WhatsApp Flow: Cobrar con CoDi">
+        <div class="flow-top">
+          <button type="button" id="flow-cerrar" class="x" aria-label="Cerrar">✕</button>
+          <b>Cobrar con CoDi</b>
+          <span class="flow-menu">⋮</span>
+        </div>
+        <div class="flow-cuerpo">
+          <p class="flow-intro">Le llega a la app del banco de tu contacto. Sin comisión.</p>
+          <label>Monto (MXN)<input id="f-monto" inputmode="decimal" autocomplete="off" placeholder="350.00" /></label>
+          <label>Concepto <span id="f-contador" class="contador">0/40</span>
+            <input id="f-concepto" maxlength="40" autocomplete="off" placeholder="Colegiatura noviembre" /></label>
+          <label>Contacto<select id="f-contacto"><option value="">Cargando…</option></select></label>
+          <label id="f-celular-l" hidden>Celular (10 dígitos)
+            <input id="f-celular" inputmode="numeric" maxlength="10" autocomplete="off" placeholder="0000000777" /></label>
+          <fieldset id="f-vigencias"><legend>Vigencia</legend></fieldset>
+          <p id="flow-error" class="snack" role="alert" hidden></p>
+        </div>
+        <div class="flow-pie">
+          <button type="submit" id="flow-enviar" class="primario">Enviar cobro</button>
+          <small>Administrado por Colegio Aurora (demo) · WhatsApp Flow simulado</small>
+        </div>
+      </form>
+    </section>
+
+    <section class="telefono receptor" aria-label="Celular del contacto (simulado)">
+      <div class="bloqueo">
+        <small id="r-quien">Celular del contacto (simulado)</small>
+        <p class="reloj" id="r-reloj">--:--</p>
+        <p id="r-vacio" class="r-vacio">Aquí llega el cobro CoDi a la app de su banco.</p>
+      </div>
+      <div id="r-noti" class="noti" hidden>
+        <button id="r-noti-abrir" class="noti-cuerpo">
+          <span class="banco">🏦 Tu banco · CoDi® · ahora</span>
+          <b id="r-noti-titulo">Cobro CoDi</b>
+          <span id="r-noti-txt"></span>
+        </button>
+        <div class="noti-acciones">
+          <button id="r-aceptar">Aceptar</button>
+          <button id="r-rechazar">Rechazar</button>
+          <button id="r-posponer">Posponer</button>
+        </div>
+      </div>
+      <div id="r-app" class="hoja banco-app" hidden role="dialog" aria-label="App bancaria: Mensaje de Cobro CoDi">
+        <div class="hoja-top">
+          <span class="logo-codi" title="Aquí va el logo oficial de CoDi® (marca de Banxico)">logo CoDi®</span>
+          <p class="banco">Tu banco (simulado) · Mensaje de Cobro</p>
+        </div>
+        <p class="monto" id="r-monto"></p>
+        <dl>
+          <dt>Beneficiario</dt><dd id="r-benef"></dd>
+          <dt>Concepto de pago</dt><dd id="r-concepto"></dd>
+          <dt>Referencia numérica</dt><dd id="r-ref"></dd>
+          <dt>Folio CoDi</dt><dd id="r-folio"></dd>
+          <dt>Vigencia</dt><dd id="r-vig"></dd>
+          <dt>Desde</dt><dd>Cuenta •••• 0000 (ficticia)</dd>
+          <dt>Comisión</dt><dd>$0.00</dd>
+        </dl>
+        <button id="r-pagar" class="primario ancho">Pagar</button>
+        <p id="r-listo" class="r-listo" hidden></p>
+      </div>
+    </section>
+
+    <section class="lado" aria-label="Cobros y eventos del servidor">
+      <p class="bitacora-titulo">Cobros a contactos</p>
+      <ol id="c-cobros" class="cobros"></ol>
+      <p class="bitacora-titulo">Eventos del servidor · Flow, webhook y ntfy</p>
+      <ol id="c-bitacora" class="bitacora"></ol>
+      <details class="condiciones" open>
+        <summary>Condiciones reales</summary>
+        <ul>
+          <li>El contacto necesita <b>CoDi activado en su banco con ese celular</b>. Si no, el bot le manda un QR o liga de pago en el mismo chat.</li>
+          <li>Quien cobra registra su <b>CLABE con el proveedor</b> (Pey: hasta 5 días hábiles). Es para negocios y colegios que cobran a cualquier contacto; no es P2P entre personas.</li>
+          <li>El dinero va <b>directo a la CLABE del beneficiario</b>; nadie concentra fondos (Reglas del SPEI, 9a. Bis 1).</li>
+          <li>Pagos en WhatsApp (WhatsApp Pay) no existe en México: CoDi llena ese hueco.</li>
+          <li>Los mensajes que inicia el negocio necesitan <b>plantillas aprobadas</b>; los Flows requieren la <b>WhatsApp Business Platform</b> (Cloud API).</li>
+          <li>Demo: el cifrado (RSA-OAEP + AES-GCM) y la firma tienen la forma de Meta, pero no hay app de Meta: el Worker hace de cliente de WhatsApp con una llave de demo. CoDi y bancos, simulados.</li>
+        </ul>
+      </details>
+    </section>
+  </main>
+
   <footer>
     Código: <a href="https://github.com/victorgalloo/inscripcion-codi">github.com/victorgalloo/inscripcion-codi</a>
     · Hackatón México 2026 · SuperLeads · No es un cobro real
@@ -82,5 +178,6 @@
     · <a href="https://github.com/victorgalloo/inscripcion-codi/blob/main/docs/regulacion.md">Regulación CoDi</a>
   </footer>
   <script src="/app.js" type="module"></script>
+  <script src="/contacto.js" type="module"></script>
 </body>
 </html>

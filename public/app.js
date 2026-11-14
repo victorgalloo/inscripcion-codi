@@ -292,7 +292,7 @@ $("#btn-ntfy").onclick = () => {
 };
 $("#btn-reiniciar").onclick = () => {
   sessionStorage.removeItem("escuela");
-  location.href = "/";
+  location.href = new URLSearchParams(location.search).get("modo") === "contacto" ? "/?modo=contacto" : "/";
 };
 
 // ── Arranque ──
