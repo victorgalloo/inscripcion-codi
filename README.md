@@ -199,6 +199,8 @@ Pey ya publica su API de CoDi en [docs.pey.mx](https://docs.pey.mx) (OpenAPI 202
 4. Probar con **$0.01 MXN** y bancos reales, como recomienda Pey mientras sale su ambiente de pruebas.
 5. Cambiar el guion del navegador por el agente de WhatsApp real (WhatsApp Business API) con el celular verdadero de la familia.
 
+Qué cubre Pey como procesador, qué le falta (reembolsos, recurrentes, tarjeta multi-colegio) y los límites de CoDi están en [docs/procesador-pagos.md](docs/procesador-pagos.md).
+
 **Lo que necesitamos de Pey:**
 
 - **Ambiente de pruebas** (anunciado como *coming soon*) para correr la demo de punta a punta sin dinero real.
