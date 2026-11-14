@@ -7,7 +7,7 @@
  * (consulta al proveedor, ver src/vencimiento.ts) y borra la demo a las 24 h.
  */
 import { DurableObject } from "cloudflare:workers";
-import { conciliar, type CobroActivo, type Etapa, type Lead, type Resultado } from "./conciliacion.ts";
+import { conciliar, type CobroActivo, type CobroContacto, type Etapa, type Lead, type Resultado } from "./conciliacion.ts";
 import type { PagoRecibido } from "./pagos/tipos.ts";
 import { crearPagos, type EnvPagos } from "./pagos/fabrica.ts";
 import { ponerCobroNuevo, proximoVencimiento, revisarVencimiento, type RevisionVencimiento } from "./vencimiento.ts";
@@ -15,7 +15,7 @@ import { leadsDeEjemplo } from "./demo.ts";
 
 export interface Evento {
   en: number; // unix ms
-  tipo: "crm" | "cobro" | "webhook" | "ntfy" | "vencimiento";
+  tipo: "crm" | "cobro" | "webhook" | "ntfy" | "vencimiento" | "whatsapp";
   texto: string;
   ok: boolean;
 }
@@ -23,30 +23,42 @@ export interface Evento {
 export interface EstadoTablero {
   escuela: string;
   leads: Lead[];
+  /** Modo «Cobrar a un contacto»: cobros CoDi mandados desde el WhatsApp Flow. */
+  contactos: CobroContacto[];
   bitacora: Evento[];
 }
 
 interface Guardado extends EstadoTablero {
   webhooks: string[]; // webhook-id ya procesados (idempotencia)
   celulares: Record<string, string>; // leadId → celular (nunca sale al navegador)
+  /** flow_token emitido → estado. Un Flow = un cobro: un token usado no vuelve a cobrar. */
+  flowTokens: Record<string, "emitido" | "reservado" | "usado">;
   limpiarEn?: number; // unix ms
 }
 
-const VACIO: Guardado = { escuela: "", leads: [], bitacora: [], webhooks: [], celulares: {} };
+type Lista = "leads" | "contactos";
+
+const VACIO: Guardado = { escuela: "", leads: [], contactos: [], bitacora: [], webhooks: [], celulares: {}, flowTokens: {} };
 const DIA_MS = 24 * 3600 * 1000;
 
 export class Tablero extends DurableObject<EnvPagos> {
   private async leer(): Promise<Guardado> {
-    return (await this.ctx.storage.get<Guardado>("tablero")) ?? structuredClone(VACIO);
+    const t = (await this.ctx.storage.get<Guardado>("tablero")) ?? structuredClone(VACIO);
+    t.contactos ??= []; // tableros guardados antes del modo «Cobrar a un contacto»
+    t.flowTokens ??= {};
+    return t;
   }
 
   /** Guarda y programa la alarma: el próximo vencimiento de cobro o la limpieza (24 h sin actividad). */
   private async guardar(t: Guardado, actividad = true): Promise<void> {
     t.bitacora = t.bitacora.slice(-30);
     t.webhooks = t.webhooks.slice(-200);
+    t.contactos = t.contactos.slice(-20);
+    const tokens = Object.entries(t.flowTokens);
+    if (tokens.length > 50) t.flowTokens = Object.fromEntries(tokens.slice(-50));
     if (actividad || !t.limpiarEn) t.limpiarEn = Date.now() + DIA_MS;
     await this.ctx.storage.put("tablero", t);
-    const vence = proximoVencimiento(t.leads);
+    const vence = proximoVencimiento([...t.leads, ...t.contactos]);
     let venceMs = vence === undefined ? Infinity : vence * 1000;
     if (venceMs <= Date.now()) venceMs = Date.now() + 60_000; // ya venció y la consulta falló: reintenta en 1 min
     await this.ctx.storage.setAlarm(Math.min(venceMs, t.limpiarEn));
@@ -64,10 +76,21 @@ export class Tablero extends DurableObject<EnvPagos> {
 
   /** Revisa los cobros vencidos (o solo el de un lead) y aplica el resultado en t. */
   private async revisarVencidos(t: Guardado, soloLead?: string): Promise<RevisionVencimiento[]> {
+    const resultados: RevisionVencimiento[] = [];
+    for (const lista of ["leads", "contactos"] as const) resultados.push(...(await this.revisarLista(t, lista, soloLead)));
+    return resultados;
+  }
+
+  private async revisarLista(t: Guardado, lista: Lista, soloLead?: string): Promise<RevisionVencimiento[]> {
     const pagos = crearPagos(this.env);
     const ahora = Math.floor(Date.now() / 1000);
     const resultados: RevisionVencimiento[] = [];
-    for (const lead of t.leads) {
+    const items: Lead[] = t[lista];
+    const poner = (nuevos: Lead[]) => {
+      if (lista === "leads") t.leads = nuevos;
+      else t.contactos = nuevos as CobroContacto[];
+    };
+    for (const lead of items) {
       if (soloLead && lead.id !== soloLead) continue;
       const r = await revisarVencimiento(lead, pagos, ahora);
       resultados.push(r);
@@ -75,7 +98,7 @@ export class Tablero extends DurableObject<EnvPagos> {
       const c = lead.cobro!;
       const consulta = c.medio === "push" ? "GET /transaction/{id}" : "GET /transaction/codi/qr/{id}";
       if (r.tipo === "vencido") {
-        t.leads = t.leads.map((l) => (l.id === lead.id ? r.lead : l));
+        poner(t[lista].map((l: Lead) => (l.id === lead.id ? r.lead : l)));
         t.bitacora.push({
           en: Date.now(),
           tipo: "vencimiento",
@@ -83,8 +106,8 @@ export class Tablero extends DurableObject<EnvPagos> {
           ok: false,
         });
       } else if (r.tipo === "pagado_sin_webhook") {
-        const { leads, resultado } = conciliar(t.leads, r.pago, Date.now());
-        t.leads = leads;
+        const { leads, resultado } = conciliar(t[lista], r.pago, Date.now());
+        poner(leads);
         t.bitacora.push({
           en: Date.now(),
           tipo: "vencimiento",
@@ -105,7 +128,7 @@ export class Tablero extends DurableObject<EnvPagos> {
   }
 
   private publico(t: Guardado): EstadoTablero {
-    return { escuela: t.escuela, leads: t.leads, bitacora: t.bitacora };
+    return { escuela: t.escuela, leads: t.leads, contactos: t.contactos, bitacora: t.bitacora };
   }
 
   async estado(): Promise<EstadoTablero> {
@@ -171,18 +194,21 @@ export class Tablero extends DurableObject<EnvPagos> {
   /** Aplica un pago verificado. Idempotente por webhook-id y por transacción. */
   async aplicarPago(webhookId: string, pago: PagoRecibido): Promise<{ resultado: Resultado; lead?: Lead }> {
     const t = await this.leer();
+    // Los cobros del WhatsApp Flow traen cobroContactoId en los metadatos; los de inscripción, leadId.
+    const lista: Lista = pago.metadatos.cobroContactoId ? "contactos" : "leads";
     if (t.webhooks.includes(webhookId)) {
-      const lead = t.leads.find((l) => l.pago?.transaccionId === pago.transaccionId);
+      const lead = (t[lista] as Lead[]).find((l) => l.pago?.transaccionId === pago.transaccionId);
       return { resultado: { tipo: "duplicado", leadId: lead?.id ?? "" }, lead };
     }
-    const { leads, resultado } = conciliar(t.leads, pago, Date.now());
-    t.leads = leads;
+    const { leads, resultado } = conciliar(t[lista], pago, Date.now());
+    if (lista === "leads") t.leads = leads;
+    else t.contactos = leads as CobroContacto[];
     t.webhooks.push(webhookId);
     const evento = pago.medio === "push" ? "codi.pn.payment_received" : "codi.qr.payment_received";
     let texto: string;
     switch (resultado.tipo) {
       case "conciliado":
-        texto = `Webhook ${evento} · firma ✓ · monto y ref ✓ · conciliado → Inscrito · Pagado`;
+        texto = `Webhook ${evento} · firma ✓ · monto y ref ✓ · conciliado → ${lista === "leads" ? "Inscrito · Pagado" : "cobro a contacto pagado"}`;
         break;
       case "duplicado":
         texto = `Webhook ${evento} repetido · ignorado`;
@@ -200,7 +226,56 @@ export class Tablero extends DurableObject<EnvPagos> {
     t.bitacora.push({ en: Date.now(), tipo: "webhook", texto, ok: resultado.tipo === "conciliado" });
     await this.guardar(t);
     const leadId = "leadId" in resultado ? resultado.leadId : undefined;
-    return { resultado, lead: t.leads.find((l) => l.id === leadId) };
+    return { resultado, lead: (t[lista] as Lead[]).find((l) => l.id === leadId) };
+  }
+
+  // ───────── modo «Cobrar a un contacto» (WhatsApp Flow) ─────────
+
+  /** El bot mandó el mensaje de Flow con este flow_token (en producción: Cloud API, type "interactive"/"flow"). */
+  async emitirFlowToken(token: string): Promise<void> {
+    const t = await this.leer();
+    t.flowTokens[token] = "emitido";
+    t.bitacora.push({ en: Date.now(), tipo: "whatsapp", texto: `WhatsApp · el bot mandó el Flow «Cobrar con CoDi» (flow_token …${token.slice(-6)})`, ok: true });
+    await this.guardar(t);
+  }
+
+  /** Aparta el flow_token antes de mandar el push, para que un doble envío del formulario no cobre dos veces. */
+  async reservarFlowToken(token: string): Promise<"ok" | "invalido" | "usado"> {
+    const t = await this.leer();
+    const e = t.flowTokens[token];
+    if (!e) return "invalido";
+    if (e !== "emitido") return "usado";
+    t.flowTokens[token] = "reservado";
+    await this.guardar(t);
+    return "ok";
+  }
+
+  async liberarFlowToken(token: string): Promise<void> {
+    const t = await this.leer();
+    if (t.flowTokens[token] === "reservado") t.flowTokens[token] = "emitido";
+    await this.guardar(t);
+  }
+
+  async estadoFlowToken(token: string): Promise<"emitido" | "reservado" | "usado" | undefined> {
+    return (await this.leer()).flowTokens[token];
+  }
+
+  async guardarCobroContacto(cc: CobroContacto, texto: string): Promise<void> {
+    const t = await this.leer();
+    t.contactos = [cc, ...t.contactos.filter((c) => c.id !== cc.id)];
+    t.flowTokens[cc.flowToken] = "usado";
+    t.bitacora.push({ en: Date.now(), tipo: "cobro", texto, ok: true });
+    await this.guardar(t);
+  }
+
+  async cobroContacto(id: string): Promise<CobroContacto | undefined> {
+    return (await this.leer()).contactos.find((c) => c.id === id);
+  }
+
+  /** Todas las referencias usadas (leads y contactos): una referencia nunca se repite. */
+  async todosLosCobros(): Promise<Lead[]> {
+    const t = await this.leer();
+    return [...t.leads, ...t.contactos];
   }
 
   async anotar(evento: Omit<Evento, "en">): Promise<void> {

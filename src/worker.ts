@@ -13,6 +13,15 @@
  *   POST /webhooks/codi            webhook real: verifica la firma (Standard Webhooks, HMAC-SHA256),
  *                                  deduplica por webhook-id, compara monto + referencia con el cobro
  *                                  original y SOLO entonces mueve a «Inscrito · Pagado» y avisa por ntfy
+ *
+ * Modo «Cobrar a un contacto» (WhatsApp Flow → push CoDi a cualquier contacto):
+ *   POST /api/contactos/flow       el bot manda el Flow «Cobrar con CoDi» (nuevo flow_token)
+ *   POST /api/demo/flow            SOLO DEMO: hace de cliente de WhatsApp: cifra el formulario con la llave
+ *                                  pública del negocio, lo firma (X-Hub-Signature-256) y lo ENTREGA POR HTTP
+ *                                  a /webhooks/whatsapp-flow; descifra la respuesta
+ *   POST /webhooks/whatsapp-flow   endpoint data_exchange del Flow (forma de Meta): firma → descifra →
+ *                                  valida → PagosCoDi.crearCobroPush(celular, …) → respuesta cifrada
+ *   GET  /api/whatsapp-flow/llave-publica   la llave pública (la que el negocio sube a Meta)
  */
 import { Tablero, type EstadoTablero } from "./tablero.ts";
 import { nuevaReferencia, type CobroActivo, type Lead } from "./conciliacion.ts";
@@ -25,6 +34,25 @@ import { firmarWebhook, verificarWebhook } from "./webhooks.ts";
 import { publicarNtfy, type ResultadoNtfy } from "./ntfy.ts";
 import { qrSvg } from "./qr.ts";
 import { CELULAR_DEMO, CUOTA_INSCRIPCION, ESCUELA_DEMO, VIGENCIA_SEGUNDOS } from "./demo.ts";
+import type { CobroContacto } from "./conciliacion.ts";
+import {
+  CONTACTOS_DEMO,
+  PANTALLA_COBRO,
+  bytesAB64,
+  cifrarComoWhatsApp,
+  datosPantallaCobro,
+  descifrarRespuestaComoWhatsApp,
+  escuelaDeFlowToken,
+  firmarMeta,
+  importarLlavePrivada,
+  llavePublicaDe,
+  nuevoFlowToken,
+  procesarFlow,
+  validarFormularioCobro,
+  type Decision,
+  type SolicitudFlow,
+} from "./whatsapp-flow.ts";
+import { enmascararCelular } from "./pagos/tipos.ts";
 
 export { Tablero };
 
@@ -42,6 +70,10 @@ export interface Env {
   /** bankAccountId (Pey) de la CLABE del colegio: el dinero cae directo ahí. */
   PEY_BANK_ACCOUNT_ID?: string;
   NTFY_TOKEN?: string;
+  /** Llave privada RSA del negocio para WhatsApp Flows (PKCS#8, PEM o base64). Secreto. */
+  WA_FLOW_PRIVATE_KEY?: string;
+  /** App secret de la app de Meta (firma X-Hub-Signature-256). Secreto. */
+  WA_APP_SECRET?: string;
 }
 
 const ESCUELA_RE = /^demo-[a-z0-9]{8,24}$/;
@@ -103,7 +135,28 @@ async function webhookCodi(req: Request, env: Env): Promise<Response> {
 
   // ntfy SOLO si: firma ✓ (arriba), webhook-id nuevo, y monto + referencia iguales al cobro original.
   const avisos: ResultadoNtfy[] = [];
-  if (resultado.tipo === "conciliado" && lead && env.NTFY_TEMA) {
+  if (resultado.tipo === "conciliado" && lead && env.NTFY_TEMA && pago.metadatos.cobroContactoId) {
+    // Cobro a un contacto: un solo push, a quien cobró (en producción también le llega por WhatsApp).
+    const a = await publicarNtfy(
+      env.NTFY_TEMA,
+      {
+        titulo: `Cobro CoDi pagado · ${lead.familia}`,
+        mensaje:
+          `${pesos(pago.montoMXN)} · ${pago.concepto} · Folio CoDi ${lead.pago?.folioCodi ?? "—"} · ` +
+          `rastreo ${pago.claveRastreo ?? "—"} · comisión $0 · directo a la CLABE de ${ESCUELA_DEMO.razonSocial}`,
+        etiquetas: ["white_check_mark", "moneybag"],
+        liga: `${new URL(req.url).origin}/?modo=contacto`,
+        prioridad: 4,
+      },
+      { base: env.NTFY_BASE, token: env.NTFY_TOKEN },
+    );
+    avisos.push(a);
+    await t.anotar({
+      tipo: "ntfy",
+      texto: `ntfy → quien cobró · ${a.status ? "HTTP " + a.status : "error: " + (a.error ?? "")}`,
+      ok: a.status === 200,
+    });
+  } else if (resultado.tipo === "conciliado" && lead && env.NTFY_TEMA) {
     const origen = new URL(req.url).origin;
     const opciones = { base: env.NTFY_BASE, token: env.NTFY_TOKEN };
     const medio = pago.medio === "push" ? "CoDi push" : "CoDi QR";
@@ -168,6 +221,160 @@ async function entregarWebhook(env: Env, origen: string, evento: unknown): Promi
   return { status: res.status, cuerpo: await res.json(), via: env.YO ? "http" : "en-proceso" };
 }
 
+// ───────────────────────── WhatsApp Flow ─────────────────────────
+
+let llavesCache: { pem: string; privada: Promise<CryptoKey>; publica: Promise<CryptoKey> } | undefined;
+
+function llavesFlow(env: Env) {
+  const pem = env.WA_FLOW_PRIVATE_KEY;
+  if (!pem || !env.WA_APP_SECRET) throw new ErrorHttp(500, "WA_FLOW_PRIVATE_KEY / WA_APP_SECRET no configurados");
+  if (llavesCache?.pem !== pem) {
+    const privada = importarLlavePrivada(pem);
+    llavesCache = { pem, privada, publica: privada.then(llavePublicaDe) };
+  }
+  return { privada: llavesCache.privada, publica: llavesCache.publica, appSecret: env.WA_APP_SECRET };
+}
+
+const mins = (seg: number) => Math.round(seg / 60);
+
+/** Lógica de negocio del Flow «Cobrar con CoDi» (ya con la firma verificada y el cuerpo descifrado). */
+async function manejarFlow(s: SolicitudFlow, env: Env): Promise<Decision> {
+  const token = String(s.flow_token ?? "");
+  const escuela = escuelaDeFlowToken(token);
+  if (!escuela) return { tokenInvalido: "Este formulario no es válido. Pide uno nuevo en el chat." };
+  const t = tablero(env, escuela);
+  const estado = await t.estadoFlowToken(token);
+  if (!estado) return { tokenInvalido: "Este formulario ya no es válido. Pide uno nuevo en el chat." };
+  if (estado !== "emitido") return { tokenInvalido: "Este cobro ya se envió." };
+
+  const pantalla = (extra: Record<string, unknown> = {}) => ({
+    respuesta: { screen: PANTALLA_COBRO, data: { ...datosPantallaCobro(), ...extra } },
+  });
+  if (s.action === "INIT" || s.action === "BACK") return pantalla();
+  if (s.action !== "data_exchange" || s.screen !== PANTALLA_COBRO) return pantalla({ error_message: "Pantalla desconocida" });
+
+  const f = validarFormularioCobro(s.data ?? {}, { soloFicticios: env.PAGOS_PROVEEDOR === "mock" });
+  if (!f.ok) return pantalla({ error_message: f.error, campo_error: f.campo });
+
+  if ((await t.reservarFlowToken(token)) !== "ok") return { tokenInvalido: "Este cobro ya se envió." };
+  const id = "cc-" + crypto.randomUUID().slice(0, 8);
+  const solicitud: SolicitudCobro = {
+    montoMXN: f.montoMXN,
+    concepto: f.concepto,
+    referencia: nuevaReferencia(await t.todosLosCobros()),
+    vigenciaSegundos: f.vigenciaSegundos,
+    metadatos: { escuelaId: escuela, cobroContactoId: id },
+  };
+  let cobro: CobroActivo;
+  try {
+    // El monto confirmado es el que el negocio escribió y envió en el formulario.
+    validarPoliticaCobro(solicitud, { montoConfirmadoMXN: f.montoMXN });
+    const c = await pagos(env).crearCobroPush(f.contacto.celular, solicitud);
+    cobro = { ...c, medio: "push", id: c.transaccionId, creadoEn: Date.now(), estado: "vigente" };
+  } catch (e) {
+    await t.liberarFlowToken(token);
+    console.warn("No se pudo crear el cobro push del Flow", (e as Error).message);
+    return pantalla({
+      error_message:
+        "No se pudo mandar el cobro CoDi a ese celular (¿tiene CoDi activado en su banco?). " +
+        "Puedes mandarle un QR o liga de pago en el chat.",
+    });
+  }
+  const cc: CobroContacto = {
+    id,
+    tipo: "contacto",
+    flowToken: token,
+    familia: f.contacto.nombre,
+    grado: f.concepto,
+    canal: "WhatsApp",
+    etapa: "cobro_enviado",
+    cobro,
+  };
+  await t.guardarCobroContacto(
+    cc,
+    `Flow data_exchange · X-Hub-Signature-256 ✓ · descifrado ✓ → push CoDi a ${cobro.celular} · ` +
+      `${pesos(f.montoMXN)} · ref ${cobro.referencia} · vence en ${mins(f.vigenciaSegundos)} min`,
+  );
+  return {
+    respuesta: {
+      screen: "SUCCESS",
+      data: {
+        extension_message_response: {
+          params: {
+            flow_token: token,
+            cobro_id: id,
+            contacto: f.contacto.nombre,
+            celular: cobro.celular,
+            monto: f.montoMXN,
+            concepto: f.concepto,
+            referencia: cobro.referencia,
+            folio_codi: cobro.folioCodi,
+            expira_en: cobro.expiraEn,
+          },
+        },
+      },
+    },
+  };
+}
+
+async function webhookFlow(req: Request, env: Env): Promise<Response> {
+  const { privada, appSecret } = llavesFlow(env);
+  const r = await procesarFlow(
+    { cuerpo: await req.text(), firma: req.headers.get("X-Hub-Signature-256") },
+    { appSecret, llavePrivada: await privada, manejar: (s) => manejarFlow(s, env) },
+  );
+  return new Response(r.cuerpo, {
+    status: r.status,
+    headers: { "Content-Type": `${r.tipo}; charset=utf-8`, "Cache-Control": "no-store" },
+  });
+}
+
+/**
+ * SOLO DEMO: hace lo que haría el cliente de WhatsApp al abrir/enviar el Flow:
+ * cifra con la llave pública del negocio, firma como Meta y entrega por HTTP real.
+ */
+async function simularClienteWhatsApp(env: Env, origen: string, payload: SolicitudFlow) {
+  const { publica, appSecret } = llavesFlow(env);
+  const { cuerpo, llave, iv } = await cifrarComoWhatsApp(await publica, payload);
+  const texto = JSON.stringify(cuerpo);
+  const firma = await firmarMeta(appSecret, texto);
+  const req = new Request(`${origen}/webhooks/whatsapp-flow`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Hub-Signature-256": firma },
+    body: texto,
+  });
+  const res = env.YO ? await env.YO.fetch(req) : await webhookFlow(req, env);
+  const respuestaTexto = await res.text();
+  let respuesta: unknown;
+  if (res.status === 200) respuesta = await descifrarRespuestaComoWhatsApp(respuestaTexto, llave, iv);
+  else {
+    try {
+      respuesta = JSON.parse(respuestaTexto);
+    } catch {
+      respuesta = respuestaTexto;
+    }
+  }
+  return {
+    status: res.status,
+    via: env.YO ? "http" : "en-proceso",
+    respuesta,
+    // Lo que viajó, recortado: para mostrar que iba cifrado y firmado.
+    transporte: {
+      "X-Hub-Signature-256": firma.slice(0, 19) + "…",
+      encrypted_aes_key: cuerpo.encrypted_aes_key.slice(0, 16) + "…",
+      encrypted_flow_data: cuerpo.encrypted_flow_data.slice(0, 16) + "…",
+      initial_vector: bytesAB64(iv).slice(0, 8) + "…",
+      respuesta_cifrada: res.status === 200 ? respuestaTexto.slice(0, 16) + "…" : undefined,
+    },
+  };
+}
+
+async function publicaPem(env: Env): Promise<string> {
+  const spki = new Uint8Array((await crypto.subtle.exportKey("spki", await llavesFlow(env).publica)) as ArrayBuffer);
+  const lineas = bytesAB64(spki).match(/.{1,64}/g) ?? [];
+  return ["-----BEGIN PUBLIC KEY-----", ...lineas, "-----END PUBLIC KEY-----", ""].join("\n");
+}
+
 // ───────────────────────── API ─────────────────────────
 
 async function api(req: Request, env: Env, url: URL): Promise<Response> {
@@ -185,7 +392,13 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
         ? { tema: env.NTFY_TEMA, servidor: base, url: ntfyUrl, qr: qrSvg(ntfyUrl) }
         : null,
       webhookConfigurado: Boolean(env.CODI_WEBHOOK_SECRET),
+      flowConfigurado: Boolean(env.WA_FLOW_PRIVATE_KEY && env.WA_APP_SECRET),
+      contactos: CONTACTOS_DEMO.map((c) => ({ id: c.id, nombre: c.nombre, celular: enmascararCelular(c.celular) })),
     });
+  }
+
+  if (ruta === "/api/whatsapp-flow/llave-publica" && req.method === "GET") {
+    return new Response(await publicaPem(env), { headers: { "Content-Type": "text/plain; charset=utf-8" } });
   }
 
   if (ruta === "/api/tablero" && req.method === "GET") {
@@ -265,6 +478,42 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
     });
   }
 
+  if (ruta === "/api/contactos/flow") {
+    // En producción: Cloud API POST /{phone-number-id}/messages con type "interactive",
+    // interactive.type "flow", flow_id y este flow_token (dentro de la ventana de 24 h del chat).
+    llavesFlow(env);
+    const flowToken = nuevoFlowToken(escuela);
+    await t.emitirFlowToken(flowToken);
+    return json({ flowToken });
+  }
+
+  if (ruta === "/api/demo/flow") {
+    if (env.PAGOS_PROVEEDOR !== "mock") throw new ErrorHttp(403, "solo en modo mock");
+    const flowToken = String(body.flowToken ?? "");
+    if (escuelaDeFlowToken(flowToken) !== escuela) throw new ErrorHttp(400, "flow_token de otra sesión");
+    const action = body.action === "INIT" ? "INIT" : "data_exchange";
+    const data = typeof body.data === "object" && body.data ? (body.data as Record<string, unknown>) : {};
+    return json(
+      await simularClienteWhatsApp(env, url.origin, {
+        version: "3.0",
+        action,
+        ...(action === "data_exchange" ? { screen: PANTALLA_COBRO, data } : {}),
+        flow_token: flowToken,
+      }),
+    );
+  }
+
+  if (ruta === "/api/demo/aceptar" && body.cobroContactoId) {
+    if (env.PAGOS_PROVEEDOR !== "mock") throw new ErrorHttp(403, "solo en modo mock");
+    if (!env.CODI_WEBHOOK_SECRET) throw new ErrorHttp(500, "CODI_WEBHOOK_SECRET no configurado");
+    const cc = await t.cobroContacto(String(body.cobroContactoId));
+    if (!cc?.cobro) throw new ErrorHttp(404, "cobro no encontrado");
+    if (cc.etapa === "pagado") throw new ErrorHttp(409, "ya está pagado");
+    if (!estaVigente(cc.cobro)) throw new ErrorHttp(409, "el cobro ya no está vigente");
+    const evento = new PagosCoDiMock().simularAceptacion(cc.cobro, { escuelaId: escuela, cobroContactoId: cc.id });
+    return json({ webhook: await entregarWebhook(env, url.origin, evento) });
+  }
+
   if (ruta === "/api/demo/aceptar") {
     if (env.PAGOS_PROVEEDOR !== "mock") throw new ErrorHttp(403, "solo en modo mock");
     if (!env.CODI_WEBHOOK_SECRET) throw new ErrorHttp(500, "CODI_WEBHOOK_SECRET no configurado");
@@ -291,6 +540,9 @@ export default {
     try {
       if (url.pathname === "/webhooks/codi") {
         return req.method === "POST" ? await webhookCodi(req, env) : json({ error: "Usa POST" }, 405);
+      }
+      if (url.pathname === "/webhooks/whatsapp-flow") {
+        return req.method === "POST" ? await webhookFlow(req, env) : json({ error: "Usa POST" }, 405);
       }
       if (url.pathname.startsWith("/api/")) return await api(req, env, url);
       return env.ASSETS.fetch(req);

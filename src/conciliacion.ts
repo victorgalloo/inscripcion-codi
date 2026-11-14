@@ -67,6 +67,18 @@ export interface Lead {
   nota?: string;
 }
 
+/**
+ * Cobro a un contacto (modo «Cobrar a un contacto»): un negocio le cobra por CoDi a
+ * cualquier contacto desde un formulario de WhatsApp. Reutiliza la forma de Lead para
+ * pasar por la MISMA conciliación y el MISMO vencimiento: `familia` = nombre del contacto,
+ * `grado` = concepto.
+ */
+export interface CobroContacto extends Lead {
+  tipo: "contacto";
+  /** flow_token del WhatsApp Flow que lo creó (uno por cobro). */
+  flowToken: string;
+}
+
 export type Resultado =
   | { tipo: "conciliado"; leadId: string }
   | { tipo: "duplicado"; leadId: string }
@@ -95,6 +107,7 @@ export function conciliar(
   const ids = (l: Lead) => [l.cobro!, ...(l.cobrosAnteriores ?? [])].map((c) => c.id);
   const lead =
     conCobro.find((l) => l.id === pago.metadatos.leadId) ??
+    conCobro.find((l) => l.id === pago.metadatos.cobroContactoId) ??
     conCobro.find((l) => ids(l).includes(pago.cobroId ?? "") || ids(l).includes(pago.transaccionId)) ??
     conCobro.find(
       (l) => l.cobro!.referencia === pago.referencia && Math.abs(l.cobro!.montoMXN - pago.montoMXN) < CENTAVO,
