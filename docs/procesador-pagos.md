@@ -34,6 +34,6 @@ Revisión de la API pública de Pey ([docs.pey.mx](https://docs.pey.mx), OpenAPI
 
 ## Pendiente en este repo
 
-- Mandar `bankAccountId` desde `PagosCoDiPey` en `/codi/qr` y `/codi/pn`.
+- ~~Mandar `bankAccountId` desde `PagosCoDiPey` en `/codi/qr` y `/codi/pn`.~~ Hecho: `PEY_BANK_ACCOUNT_ID`.
 - Exponer el alta de CLABEs (`POST /bank-account`, `GET /bank-account/{id}`).
 - Recibir `bank_account.updated` en `/webhooks/codi`.

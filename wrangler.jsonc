@@ -29,5 +29,6 @@
   // Secretos (nunca en el repo):
   //   npx wrangler secret put CODI_WEBHOOK_SECRET   (whsec_… · en modo "pey", el que da el portal de Pey)
   //   npx wrangler secret put PEY_API_KEY           (solo modo "pey")
+  //   PEY_BANK_ACCOUNT_ID (var o secreto, modo "pey"): bankAccountId de la CLABE del colegio; el dinero cae directo ahí
   //   npx wrangler secret put NTFY_TOKEN            (opcional, temas privados)
 }
