@@ -16,9 +16,14 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Tablero"] }],
   "vars": {
     // "mock" = CoDi simulado (demo pública). "pey" = API real de Pey (requiere secretos).
-    "PAGOS_PROVEEDOR": "mock"
+    "PAGOS_PROVEEDOR": "mock",
+    // Tema PÚBLICO de ntfy para la demo: cualquiera que lo conozca recibe los avisos.
+    // En producción: un tema por colegio con token de acceso (secreto NTFY_TOKEN).
+    "NTFY_TEMA": "inscripcion-codi-vmjgfbix3cnxl74b",
+    "NTFY_BASE": "https://ntfy.sh"
   }
-  // Secretos para modo "pey" (nunca en el repo):
-  //   npx wrangler secret put PEY_API_KEY
-  //   npx wrangler secret put PEY_WEBHOOK_SECRET
+  // Secretos (nunca en el repo):
+  //   npx wrangler secret put CODI_WEBHOOK_SECRET   (whsec_… · en modo "pey", el que da el portal de Pey)
+  //   npx wrangler secret put PEY_API_KEY           (solo modo "pey")
+  //   npx wrangler secret put NTFY_TOKEN            (opcional, temas privados)
 }
