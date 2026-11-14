@@ -1,0 +1,79 @@
+{
+  "version": "6.3",
+  "data_api_version": "3.0",
+  "routing_model": { "COBRO": [] },
+  "screens": [
+    {
+      "id": "COBRO",
+      "title": "Cobrar con CoDi",
+      "terminal": true,
+      "data": {
+        "contactos": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": { "id": { "type": "string" }, "title": { "type": "string" }, "description": { "type": "string" } }
+          },
+          "__example__": [
+            { "id": "mariana", "title": "Mariana López (demo)", "description": "•• •••• ••01" },
+            { "id": "otro", "title": "Otro número (10 dígitos)" }
+          ]
+        },
+        "vigencias": {
+          "type": "array",
+          "items": { "type": "object", "properties": { "id": { "type": "string" }, "title": { "type": "string" } } },
+          "__example__": [
+            { "id": "30", "title": "30 min" },
+            { "id": "60", "title": "60 min" }
+          ]
+        },
+        "concepto_max": { "type": "number", "__example__": 40 }
+      },
+      "layout": {
+        "type": "SingleColumnLayout",
+        "children": [
+          {
+            "type": "Form",
+            "name": "cobro",
+            "children": [
+              { "type": "TextBody", "text": "Le llega a la app del banco de tu contacto. Sin comisión." },
+              { "type": "TextInput", "name": "monto", "label": "Monto (MXN)", "input-type": "number", "required": true },
+              {
+                "type": "TextInput",
+                "name": "concepto",
+                "label": "Concepto",
+                "input-type": "text",
+                "max-chars": 40,
+                "helper-text": "Máximo 40 caracteres, sin datos personales",
+                "required": true
+              },
+              { "type": "Dropdown", "name": "contacto", "label": "Contacto", "data-source": "${data.contactos}", "required": true },
+              {
+                "type": "TextInput",
+                "name": "celular",
+                "label": "Celular (si elegiste otro número)",
+                "input-type": "phone",
+                "required": false
+              },
+              { "type": "RadioButtonsGroup", "name": "vigencia", "label": "Vigencia", "data-source": "${data.vigencias}", "required": true },
+              {
+                "type": "Footer",
+                "label": "Enviar cobro",
+                "on-click-action": {
+                  "name": "data_exchange",
+                  "payload": {
+                    "monto": "${form.monto}",
+                    "concepto": "${form.concepto}",
+                    "contacto": "${form.contacto}",
+                    "celular": "${form.celular}",
+                    "vigencia": "${form.vigencia}"
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}
