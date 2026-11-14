@@ -4,6 +4,7 @@
 const $ = (s) => document.querySelector(s);
 const pesos = (n) => n.toLocaleString("es-MX", { style: "currency", currency: "MXN" });
 const hora = (ms = Date.now()) => new Date(ms).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit" });
+const horaSeg = (ms) => new Date(ms).toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 
@@ -72,7 +73,7 @@ async function pedirInformes() {
   await agente(
     "¡Hola! Soy el asistente de admisiones del <b>Colegio Aurora</b> (demo).\n" +
     "Para <b>1° de primaria, ciclo 2027-28</b>:\n• Inscripción: <b>$4,850</b>\n• Colegiatura: $3,900 al mes\n" +
-    "<small>(montos ficticios)</small>\n¿Quieres que te aparte un lugar?",
+    "<small>(montos ficticios)</small>¿Quieres que te aparte un lugar?",
   );
   respuestas([["Sí, ¿cómo pago la inscripción?", enviarPush]]);
 }
@@ -84,7 +85,7 @@ async function enviarPush() {
   await agente(
     `Listo. Te envié un <b>cobro CoDi</b> a la app de tu banco (celular ${esc(cobro.celular)}).\n` +
     "Ábrelo y toca <b>Aceptar</b>: es transferencia inmediata y sin comisión." +
-    `<div class="tarjeta"><b>Paga tu inscripción</b>${pesos(cobro.montoMXN)} · ref ${cobro.referencia}` +
+    `<div class="tarjeta" data-cobro><b>Paga tu inscripción</b>${pesos(cobro.montoMXN)} · ref ${cobro.referencia}` +
     `<small>Vence a las ${hora(cobro.expiraEn * 1000)}</small></div>`,
   );
   await esperar(900);
@@ -126,7 +127,7 @@ async function enviarQR() {
   refrescar();
   const m = await agente(
     "Claro. Escanea este <b>QR CoDi</b> desde la app de tu banco (misma referencia, mismo monto):" +
-    `<div class="tarjeta"><div class="qr">${r.qrSvg}</div>${pesos(cobro.montoMXN)} · ref ${cobro.referencia}` +
+    `<div class="tarjeta" data-cobro><div class="qr">${r.qrSvg}</div>${pesos(cobro.montoMXN)} · ref ${cobro.referencia}` +
     `<small>QR de demostración: no lo pagues con un banco real.</small>` +
     `<button class="primario">Simular: escaneé y pagué</button></div>`,
   );
@@ -151,6 +152,12 @@ async function confirmarEnChat(l) {
   if (avisado) return;
   avisado = true;
   $("#respuestas").innerHTML = "";
+  $("#banner").hidden = $("#hoja").hidden = true;
+  for (const t of document.querySelectorAll("[data-cobro]")) {
+    t.classList.add("pagada");
+    t.querySelector("b")?.insertAdjacentText("beforeend", " · Pagado ✓");
+    t.querySelector("button")?.remove();
+  }
   await agente(
     `✅ <b>¡Pago recibido!</b> ${pesos(l.pago.montoMXN)} por CoDi, sin comisión.\n` +
     `Clave de rastreo: ${esc(l.pago.claveRastreo || "—")}\n` +
@@ -175,8 +182,8 @@ function tarjeta(l) {
   } else if (l.etapa === "cobro_enviado") {
     detalle = `<div class="detalle esperando">esperando pago</div>`;
   } else if (l.etapa === "pagado" && l.pago) {
-    detalle = `<div class="detalle">✓ ${pesos(l.pago.montoMXN)} · CoDi ${l.pago.medio === "push" ? "push" : "QR"} · comisión $0` +
-      (l.pago.claveRastreo ? `<br>rastreo ${esc(l.pago.claveRastreo)}` : "") + "</div>";
+    detalle = `<div class="detalle">✓ ${pesos(l.pago.montoMXN)} · CoDi ${l.pago.medio === "push" ? "push" : "QR"}<br>sin comisión` +
+      (l.pago.claveRastreo ? ` · rastreo ${esc(l.pago.claveRastreo)}` : "") + "</div>";
   }
   const movido = etapaPrevia.has(l.id) && etapaPrevia.get(l.id) !== l.etapa;
   etapaPrevia.set(l.id, l.etapa);
@@ -191,7 +198,7 @@ function dibujar(estado) {
     return `<div class="col ${id}"><h3>${nombre}<span>${deEtapa.length}</span></h3>${deEtapa.map(tarjeta).join("")}</div>`;
   }).join("");
   $("#bitacora").innerHTML = estado.bitacora.slice(-7).reverse().map((e) =>
-    `<li class="${e.tipo === "webhook" || e.tipo === "ntfy" ? (e.ok ? "ok" : "error") : ""}"><time>${hora(e.en)}</time>${esc(e.texto)}</li>`,
+    `<li class="${e.tipo === "webhook" || e.tipo === "ntfy" ? (e.ok ? "ok" : "error") : ""}"><time>${horaSeg(e.en)}</time>${esc(e.texto)}</li>`,
   ).join("") || "<li>Escribe en el chat para empezar.</li>";
 
   const mio = estado.leads.find((l) => l.demo);
@@ -214,7 +221,8 @@ async function configurar() {
   $("#proveedor").textContent = c.proveedor === "mock" ? "CoDi simulado" : "CoDi vía Pey";
   if (c.ntfy) {
     $("#ntfy-qr").innerHTML = c.ntfy.qr;
-    $("#ntfy-tema").textContent = c.ntfy.tema;
+    $("#ntfy-tema").textContent = "tema: " + c.ntfy.tema;
+    $("#ntfy-servidor").textContent = "servidor: " + c.ntfy.servidor;
   } else {
     $("#btn-ntfy").hidden = true;
   }

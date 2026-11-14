@@ -10,6 +10,7 @@
   --r: 14px;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 html, body { margin: 0; height: 100%; }
 body {
   font: 15px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -30,7 +31,7 @@ header .sub { color: var(--muted); margin-left: 10px; font-size: 13px; }
 header nav { display: flex; gap: 6px; }
 .pop { position: absolute; right: 24px; top: 52px; z-index: 10; width: 280px; background: #fff; border: 1px solid var(--linea); border-radius: var(--r); padding: 16px; box-shadow: 0 10px 30px #0001; text-align: center; }
 .pop p { margin: 8px 0; font-size: 13px; }
-.pop code { display: block; word-break: break-all; background: var(--fondo); padding: 6px; border-radius: 8px; font-size: 12px; }
+.pop code { display: block; margin-top: 4px; word-break: break-all; background: var(--fondo); padding: 6px; border-radius: 8px; font-size: 12px; }
 #ntfy-qr svg { width: 170px; height: 170px; }
 
 main { flex: 1; display: grid; grid-template-columns: 380px 1fr; gap: 24px; padding: 0 24px 12px; min-height: 0; }
@@ -39,7 +40,7 @@ main { flex: 1; display: grid; grid-template-columns: 380px 1fr; gap: 24px; padd
 .telefono { position: relative; display: flex; flex-direction: column; background: var(--chat); border: 1px solid var(--linea); border-radius: 28px; overflow: hidden; min-height: 560px; max-height: calc(100vh - 110px); }
 .chat-top { display: flex; gap: 10px; align-items: center; padding: 12px 16px; background: #fff; border-bottom: 1px solid var(--linea); }
 .avatar { width: 34px; height: 34px; border-radius: 50%; background: var(--verde); color: #fff; display: grid; place-items: center; font-weight: 700; }
-.chat { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.chat { flex: 1; overflow-y: auto; scrollbar-width: thin; padding: 14px; display: flex; flex-direction: column; gap: 8px; }
 .msg { max-width: 82%; padding: 8px 11px; border-radius: 10px; background: #fff; box-shadow: 0 1px 0 #0000000d; white-space: pre-line; animation: entra .25s ease; }
 .msg.familia { align-self: flex-end; background: var(--burbuja); }
 .msg .hora { float: right; margin: 6px 0 -4px 10px; font-size: 11px; color: var(--muted); }
@@ -48,10 +49,11 @@ main { flex: 1; display: grid; grid-template-columns: 380px 1fr; gap: 24px; padd
 .tarjeta b { display: block; }
 .tarjeta .qr svg { width: 180px; height: 180px; display: block; margin: 6px auto; }
 .tarjeta button { width: 100%; margin-top: 6px; }
+.tarjeta.pagada { border-color: #bfe3cf; background: var(--verde-suave); }
 .respuestas { padding: 10px; display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; min-height: 56px; }
 .respuestas button { background: #fff; border-color: var(--verde); color: var(--verde); }
 
-.banner { position: absolute; left: 10px; right: 10px; top: 10px; z-index: 5; text-align: left; border-radius: 16px; padding: 10px 14px; background: #ffffffee; backdrop-filter: blur(8px); box-shadow: 0 8px 24px #0002; animation: baja .35s ease; display: flex; flex-direction: column; }
+.banner { position: absolute; left: 10px; right: 10px; top: 10px; z-index: 5; text-align: left; border-radius: 16px; padding: 10px 14px; background: #fff; box-shadow: 0 8px 24px #0002; animation: baja .35s ease; display: flex; flex-direction: column; }
 .banner .banco, .hoja .banco { font-size: 12px; color: var(--muted); }
 .hoja { position: absolute; left: 0; right: 0; bottom: 0; z-index: 6; background: #fff; border-radius: 22px 22px 0 0; padding: 18px 20px 20px; box-shadow: 0 -10px 30px #0002; animation: sube .3s ease; }
 .hoja .monto { font-size: 30px; font-weight: 700; margin: 4px 0 8px; }
@@ -61,22 +63,25 @@ main { flex: 1; display: grid; grid-template-columns: 380px 1fr; gap: 24px; padd
 .acciones { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 
 /* ── CRM ── */
-.crm { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.crm { display: flex; flex-direction: column; min-width: 0; min-height: 0; max-height: calc(100vh - 110px); }
 .crm-top { display: flex; justify-content: space-between; align-items: baseline; padding: 4px 2px 10px; }
 #vivo { color: var(--verde); }
-.tablero { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-.col { background: #fff; border: 1px solid var(--linea); border-radius: var(--r); padding: 10px; min-height: 330px; }
-.col h3 { margin: 0 0 10px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); display: flex; justify-content: space-between; }
+.tablero { flex: 1; min-height: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.col { background: #fff; border: 1px solid var(--linea); border-radius: var(--r); padding: 10px; min-height: 260px; overflow-y: auto; scrollbar-width: thin; }
+.col h3 { margin: 0 0 10px; font-size: 13px; font-weight: 600; color: var(--muted); display: flex; justify-content: space-between; }
 .col.pagado h3 { color: var(--verde); }
 .card { border: 1px solid var(--linea); border-radius: 10px; padding: 9px 10px; margin-bottom: 8px; font-size: 13px; background: #fff; }
 .card .canal { font-size: 11px; color: var(--muted); }
-.card.demo { border-color: var(--texto); }
+.card.demo { border: 2px solid var(--texto); }
+.card.demo.pagado { border-color: var(--verde); }
 .card.pagado { background: var(--verde-suave); border-color: #bfe3cf; }
 .card.movido { animation: flash 1.4s ease; }
 .card .detalle { margin-top: 6px; font-size: 12px; color: var(--muted); }
 .card.pagado .detalle { color: var(--verde); }
+.esperando { color: #8a5a00 !important; }
 .esperando::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: #e0a100; margin-right: 6px; animation: late 1.2s infinite; }
-.bitacora { list-style: none; margin: 12px 0 0; padding: 10px 12px; background: #fff; border: 1px solid var(--linea); border-radius: var(--r); font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); min-height: 90px; overflow: auto; }
+.bitacora-titulo { margin: 14px 2px 6px; font-size: 13px; font-weight: 600; color: var(--muted); }
+.bitacora { list-style: none; margin: 0; padding: 10px 12px; background: #fff; border: 1px solid var(--linea); border-radius: var(--r); font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; color: #4a4a4f; height: 150px; overflow: auto; }
 .bitacora li.ok { color: var(--verde); }
 .bitacora li.error { color: #b42318; }
 .bitacora time { color: #a1a1a6; margin-right: 8px; }

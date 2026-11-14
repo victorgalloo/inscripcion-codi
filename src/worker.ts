@@ -136,12 +136,12 @@ async function webhookCodi(req: Request, env: Env): Promise<Response> {
     for (const [i, a] of avisos.entries()) {
       await t.anotar({
         tipo: "ntfy",
-        texto: `ntfy → ${i === 0 ? "colegio" : "familia"} · HTTP ${a.status || "error"}`,
+        texto: `ntfy → ${i === 0 ? "colegio" : "familia"} · ${a.status ? "HTTP " + a.status : "error: " + (a.error ?? "")}`,
         ok: a.status === 200,
       });
     }
   }
-  return json({ ok: true, webhookId: v.id, resultado, ntfy: avisos.map((a) => ({ status: a.status, id: a.id })) });
+  return json({ ok: true, webhookId: v.id, resultado, ntfy: avisos.map((a) => ({ status: a.status, id: a.id, error: a.error })) });
 }
 
 /** Entrega el webhook simulado por HTTP real (service binding a este mismo Worker). */
@@ -175,7 +175,9 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
     return json({
       proveedor: env.PAGOS_PROVEEDOR,
       escuela: ESCUELA_DEMO,
-      ntfy: ntfyUrl ? { tema: env.NTFY_TEMA, url: ntfyUrl, qr: qrSvg(ntfyUrl) } : null,
+      ntfy: ntfyUrl
+        ? { tema: env.NTFY_TEMA, servidor: base, url: ntfyUrl, qr: qrSvg(ntfyUrl) }
+        : null,
       webhookConfigurado: Boolean(env.CODI_WEBHOOK_SECRET),
     });
   }
