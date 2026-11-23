@@ -25,6 +25,32 @@
     // ntfy.sh no responde a las salidas de Cloudflare Workers (timeouts; desde otras redes da 200),
     // así que la demo publica en el servidor público ntfy.envs.net. Fuera de Cloudflare: https://ntfy.sh
     "NTFY_BASE": "https://ntfy.envs.net"
+  },
+  // Ambiente con el API REAL de pey (npx wrangler deploy --env pey → Worker «inscripcion-codi-pey»).
+  // Cobra $0.01 a la CLABE de pruebas de pey ligada a la API key; la demo pública de arriba sigue en mock.
+  "env": {
+    "pey": {
+      "name": "inscripcion-codi-pey",
+      "workers_dev": true,
+      "durable_objects": {
+        "bindings": [{ "name": "TABLERO", "class_name": "Tablero" }]
+      },
+      "services": [{ "binding": "YO", "service": "inscripcion-codi-pey" }],
+      "vars": {
+        "PAGOS_PROVEEDOR": "pey",
+        "PEY_MONTO_PRUEBA_MXN": "0.01",
+        // Titular de la CLABE de pruebas de pey (docs.pey.mx, «Crear una API key»): es quien recibe el $0.01.
+        "PEY_BENEFICIARIO": "Ramón Orraca Lascurain (CLABE de pruebas de pey)",
+        "NTFY_TEMA": "inscripcion-codi-pey-q7k2m9x4w8rt",
+        "NTFY_BASE": "https://ntfy.envs.net"
+      },
+      // Bóveda de Cloudflare (Secrets Store «superleads»): el valor nunca pasa por el repo.
+      "secrets_store_secrets": [
+        { "binding": "PEY_API_KEY_TEST", "store_id": "308dac6355cb4d7a8bef6cc8ef7ee035", "secret_name": "PEY_API_KEY_TEST" },
+        { "binding": "PEY_WEBHOOK_SECRET_TEST", "store_id": "308dac6355cb4d7a8bef6cc8ef7ee035", "secret_name": "PEY_WEBHOOK_SECRET_TEST" }
+      ]
+      // Opcional: PEY_CELULAR_PRUEBA (wrangler secret put --env pey): único celular que recibe un push real.
+    }
   }
   // Secretos (nunca en el repo):
   //   npx wrangler secret put CODI_WEBHOOK_SECRET   (whsec_… · en modo "pey", el que da el portal de Pey)

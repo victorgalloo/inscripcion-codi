@@ -26,14 +26,15 @@
 import { Tablero, type EstadoTablero } from "./tablero.ts";
 import { nuevaReferencia, type CobroActivo, type Lead } from "./conciliacion.ts";
 import { PagosCoDiMock } from "./pagos/mock.ts";
-import { crearPagos } from "./pagos/fabrica.ts";
+import { crearPagos, secretoWebhook, type SecretoBoveda } from "./pagos/fabrica.ts";
+import { beneficiarioSegunModo, celularDestino, cuotaSegunModo } from "./modo.ts";
 import { validarPoliticaCobro, type PagoRecibido, type SolicitudCobro } from "./pagos/tipos.ts";
 import { estaVigente } from "./vencimiento.ts";
 import { AVISO_PRIVACIDAD, mensajeAntesDelCobro, pesos } from "./mensajes.ts";
 import { firmarWebhook, verificarWebhook } from "./webhooks.ts";
 import { publicarNtfy, type ResultadoNtfy } from "./ntfy.ts";
 import { qrSvg } from "./qr.ts";
-import { CELULAR_DEMO, CUOTA_INSCRIPCION, ESCUELA_DEMO, VIGENCIA_SEGUNDOS } from "./demo.ts";
+import { CELULAR_DEMO, ESCUELA_DEMO, VIGENCIA_SEGUNDOS } from "./demo.ts";
 import type { CobroContacto } from "./conciliacion.ts";
 import {
   CONTACTOS_DEMO,
@@ -69,6 +70,12 @@ export interface Env {
   PEY_API_KEY?: string;
   /** bankAccountId (Pey) de la CLABE del colegio: el dinero cae directo ahí. */
   PEY_BANK_ACCOUNT_ID?: string;
+  /** Bóveda (Secrets Store `superleads`): API key y secreto de webhooks de la CLABE de pruebas de pey. */
+  PEY_API_KEY_TEST?: SecretoBoveda;
+  PEY_WEBHOOK_SECRET_TEST?: SecretoBoveda;
+  /** Modo pey: monto de prueba (p. ej. "0.01") y único celular que puede recibir un push real. */
+  PEY_MONTO_PRUEBA_MXN?: string;
+  PEY_CELULAR_PRUEBA?: string;
   NTFY_TOKEN?: string;
   /** Llave privada RSA del negocio para WhatsApp Flows (PKCS#8, PEM o base64). Secreto. */
   WA_FLOW_PRIVATE_KEY?: string;
@@ -116,9 +123,10 @@ class ErrorHttp extends Error {
 // ───────────────────────── webhook ─────────────────────────
 
 async function webhookCodi(req: Request, env: Env): Promise<Response> {
-  if (!env.CODI_WEBHOOK_SECRET) return json({ error: "CODI_WEBHOOK_SECRET no configurado" }, 500);
+  const secreto = await secretoWebhook(env);
+  if (!secreto) return json({ error: "CODI_WEBHOOK_SECRET no configurado" }, 500);
   const cuerpo = await req.text();
-  const v = await verificarWebhook(env.CODI_WEBHOOK_SECRET, req.headers, cuerpo);
+  const v = await verificarWebhook(secreto, req.headers, cuerpo);
   if (!v.ok) return json({ error: v.motivo }, 401);
 
   let pago: PagoRecibido;
@@ -143,7 +151,7 @@ async function webhookCodi(req: Request, env: Env): Promise<Response> {
         titulo: `Cobro CoDi pagado · ${lead.familia}`,
         mensaje:
           `${pesos(pago.montoMXN)} · ${pago.concepto} · Folio CoDi ${lead.pago?.folioCodi ?? "—"} · ` +
-          `rastreo ${pago.claveRastreo ?? "—"} · comisión $0 · directo a la CLABE de ${ESCUELA_DEMO.razonSocial}`,
+          `rastreo ${pago.claveRastreo ?? "—"} · comisión $0 · directo a la CLABE de ${beneficiarioSegunModo(env)}`,
         etiquetas: ["white_check_mark", "moneybag"],
         liga: `${new URL(req.url).origin}/?modo=contacto`,
         prioridad: 4,
@@ -179,7 +187,7 @@ async function webhookCodi(req: Request, env: Env): Promise<Response> {
       await publicarNtfy(
         env.NTFY_TEMA,
         {
-          titulo: `Familia · ${ESCUELA_DEMO.razonSocial} recibió tu pago`,
+          titulo: `Familia · ${beneficiarioSegunModo(env)} recibió tu pago`,
           mensaje:
             `Inscripción ${ESCUELA_DEMO.ciclo} · ${lead.grado} confirmada. ${pesos(pago.montoMXN)} sin comisión · ` +
             `Folio CoDi ${lead.pago?.folioCodi ?? "—"} · rastreo ${pago.claveRastreo ?? "—"} · desde CLABE ${pago.clabeOrdenante ?? "—"}`,
@@ -385,13 +393,14 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
     const ntfyUrl = env.NTFY_TEMA ? `${base}/${env.NTFY_TEMA}` : null;
     return json({
       proveedor: env.PAGOS_PROVEEDOR,
-      escuela: ESCUELA_DEMO,
-      cuota: CUOTA_INSCRIPCION,
+      escuela: { ...ESCUELA_DEMO, razonSocial: beneficiarioSegunModo(env) },
+      cuota: cuotaSegunModo(env),
+      pushReal: env.PAGOS_PROVEEDOR === "pey" ? Boolean(celularDestino(env, "")) : true,
       avisoPrivacidad: AVISO_PRIVACIDAD,
       ntfy: ntfyUrl
         ? { tema: env.NTFY_TEMA, servidor: base, url: ntfyUrl, qr: qrSvg(ntfyUrl) }
         : null,
-      webhookConfigurado: Boolean(env.CODI_WEBHOOK_SECRET),
+      webhookConfigurado: Boolean(env.CODI_WEBHOOK_SECRET || env.PEY_WEBHOOK_SECRET_TEST),
       flowConfigurado: Boolean(env.WA_FLOW_PRIVATE_KEY && env.WA_APP_SECRET),
       contactos: CONTACTOS_DEMO.map((c) => ({ id: c.id, nombre: c.nombre, celular: enmascararCelular(c.celular) })),
     });
@@ -420,7 +429,7 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
     const lead: Lead = {
       id: "lead-" + crypto.randomUUID().slice(0, 8),
       familia: "Familia Demo (tú)",
-      grado: CUOTA_INSCRIPCION.grado,
+      grado: cuotaSegunModo(env).grado,
       canal: "WhatsApp",
       etapa: "informes",
       demo: true,
@@ -442,8 +451,8 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
       throw new ErrorHttp(409, "el cobro anterior ya se pagó; espera la confirmación");
     }
     const solicitud: SolicitudCobro = {
-      montoMXN: CUOTA_INSCRIPCION.montoMXN,
-      concepto: CUOTA_INSCRIPCION.concepto,
+      montoMXN: cuotaSegunModo(env).montoMXN,
+      concepto: cuotaSegunModo(env).concepto,
       // Cada Mensaje de Cobro es NUEVO: referencia nueva (y folio nuevo del proveedor).
       // Un cobro vencido, rechazado o sustituido nunca se reutiliza.
       referencia: nuevaReferencia(leads),
@@ -462,7 +471,10 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
     const ahora = Date.now();
     let cobro: CobroActivo;
     if (medio === "push") {
-      const c = await p.crearCobroPush(celular, solicitud);
+      // Modo pey: el push real solo va al celular de prueba (nunca al ficticio de la demo).
+      const destino = celularDestino(env, celular);
+      if (!destino) throw new ErrorHttp(403, "en modo pey el push solo va al celular de prueba; usa QR");
+      const c = await p.crearCobroPush(destino, solicitud);
       cobro = { ...c, medio: "push", id: c.transaccionId, creadoEn: ahora };
     } else {
       const c = await p.crearCobroQR(solicitud);
@@ -471,8 +483,8 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
     await t.guardarCobro(leadId, cobro);
     return json({
       cobro,
-      beneficiario: ESCUELA_DEMO.razonSocial,
-      mensaje: mensajeAntesDelCobro(cobro, ESCUELA_DEMO.razonSocial),
+      beneficiario: beneficiarioSegunModo(env),
+      mensaje: mensajeAntesDelCobro(cobro, beneficiarioSegunModo(env)),
       avisoPrivacidad: AVISO_PRIVACIDAD,
       qrSvg: cobro.qrString ? qrSvg(cobro.qrString) : undefined,
     });

@@ -9,9 +9,8 @@
  *   Webhooks firmados con Standard Webhooks:
  *     codi.qr.payment_received · codi.pn.payment_received
  *
- * ESTADO: implementado y probado con un `fetch` falso (test/pey.test.ts).
- * Aún NO se ha ejecutado contra api.pey.mx con una API key real; Pey recomienda
- * probar en producción con montos de $0.01 MXN mientras sale su ambiente de pruebas.
+ * ESTADO: probado con un `fetch` falso (test/pagos.test.ts) y, desde el 22-nov-2026, contra
+ * api.pey.mx con una API key real ligada a la CLABE de pruebas de pey (cobros de $0.01 MXN).
  *
  * El cobro cae DIRECTO en la CLABE del colegio (`bankAccountId`, en estado ACTIVE en Pey);
  * SuperLeads nunca recibe ni concentra fondos (Reglas del SPEI, regla 9a. Bis 1).
@@ -46,14 +45,15 @@ type Fetcher = (input: string, init?: RequestInit) => Promise<Response>;
 
 export class PagosCoDiPey implements PagosCoDi {
   readonly proveedor = "pey" as const;
-  private apiKey: string;
+  private apiKey: string | (() => Promise<string>);
   private base: string;
   private fetcher: Fetcher;
   private ahora: () => number;
   private cuentaColegio?: string;
 
   constructor(opciones: {
-    apiKey: string;
+    /** La API key, o una función que la lee (p. ej. de un binding del Secrets Store de Cloudflare). */
+    apiKey: string | (() => Promise<string>);
     /** `bankAccountId` (ULID) de la CLABE del colegio registrada en Pey. */
     cuentaColegio?: string;
     base?: string;
@@ -155,7 +155,7 @@ export class PagosCoDiPey implements PagosCoDi {
     const res = await this.fetcher(this.base + ruta, {
       method: metodo,
       headers: {
-        Authorization: `Bearer ${this.apiKey}`,
+        Authorization: `Bearer ${typeof this.apiKey === "string" ? this.apiKey : await this.apiKey()}`,
         Accept: "application/json",
         ...(cuerpo ? { "Content-Type": "application/json" } : {}),
       },

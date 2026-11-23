@@ -10,7 +10,8 @@
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts",
-    "check": "npm run typecheck && npm test && wrangler deploy --dry-run --outdir .wrangler/dry"
+    "check": "npm run typecheck && npm test && wrangler deploy --dry-run --outdir .wrangler/dry",
+    "prueba:pey": "node scripts/prueba-pey-real.ts"
   },
   "dependencies": {
     "qrcode-generator": "^2.0.4"

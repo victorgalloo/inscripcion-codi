@@ -308,10 +308,28 @@ node -e "console.log('CODI_WEBHOOK_SECRET=whsec_'+require('crypto').randomBytes(
 # modo «Cobrar a un contacto»: llave RSA (PKCS#8 en base64, una línea) y app secret de demo
 node -e "const c=require('crypto');const k=c.generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'der'});console.log('WA_FLOW_PRIVATE_KEY='+k.toString('base64')+'\nWA_APP_SECRET='+c.randomBytes(24).toString('hex'))" >> .dev.vars
 npm run dev          # http://localhost:8787
-npm test             # 59 pruebas: firmas, conciliación, vencimiento, política del cobro, contrato de Pey, mock, ntfy, WhatsApp Flow
+npm test             # 64 pruebas: firmas, conciliación, vencimiento, política del cobro, contrato de Pey, mock, ntfy, WhatsApp Flow
 npm run typecheck
 npx wrangler deploy  # y luego: npx wrangler secret put CODI_WEBHOOK_SECRET (y WA_FLOW_PRIVATE_KEY, WA_APP_SECRET)
 ```
+
+## Modo pey: el API real, encendido (22-nov-2026)
+
+Además de la demo pública (mock), hay un segundo Worker con el API real de pey:
+**https://inscripcion-codi-pey.noisy-shape-4fc9.workers.dev** (`npx wrangler deploy --env pey`).
+
+- Cobra **$0.01 MXN** (`PEY_MONTO_PRUEBA_MXN`) a la CLABE de pruebas que pey publica en
+  [docs.pey.mx](https://docs.pey.mx/docs/tutorials/getting-started/create-an-api-key) (titular Ramón Orraca Lascurain,
+  lo pagado no se devuelve). El mensaje a la familia dice ese beneficiario real, no el colegio ficticio.
+- La API key y el secreto de webhooks viven en la bóveda de Cloudflare (Secrets Store, bindings
+  `PEY_API_KEY_TEST` y `PEY_WEBHOOK_SECRET_TEST`); nunca en el repo.
+- El webhook de pey apunta a `/webhooks/codi` de ese Worker y se verifica con Standard Webhooks.
+- El push real solo va al celular de prueba (`PEY_CELULAR_PRUEBA`); sin él, el modo pey cobra por QR. El celular
+  ficticio de la demo nunca recibe un push real.
+- `npm run prueba:pey` crea un QR real de $0.01 desde tu máquina (llave en `~/.config/pey/api_key_test`, chmod 600)
+  y consulta su estado con `GET /transaction/codi/qr/{id}`.
+- Tope: `POST /codi/qr` aceptó montos de $8,000.01 a $1,000,001 sin error; el tope por operación lo pone el banco de
+  quien paga (Banxico/bancos publican $8,000), no el API. `POST /codi/pn` documenta máximo $1,000,000.
 
 ## Ruta a la API real de Pey
 
