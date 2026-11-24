@@ -54,6 +54,15 @@ import {
   type SolicitudFlow,
 } from "./whatsapp-flow.ts";
 import { enmascararCelular } from "./pagos/tipos.ts";
+import {
+  ESCUELA_AGENTE_DEFAULT,
+  construirLlmsTxt,
+  construirOfertaAgente,
+  consultarApartadoAgente,
+  desglosarTokenPago,
+  procesarApartadoAgente,
+  validarEscuelaAgente,
+} from "./agente.ts";
 
 export { Tablero };
 
@@ -403,6 +412,44 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
       webhookConfigurado: Boolean(env.CODI_WEBHOOK_SECRET || env.PEY_WEBHOOK_SECRET_TEST),
       flowConfigurado: Boolean(env.WA_FLOW_PRIVATE_KEY && env.WA_APP_SECRET),
       contactos: CONTACTOS_DEMO.map((c) => ({ id: c.id, nombre: c.nombre, celular: enmascararCelular(c.celular) })),
+      agente: {
+        protocolo: "x402-codi-mxn",
+        ofertaUrl: "/agente/oferta.json",
+        llmsTxtUrl: "/llms.txt",
+        apartarUrl: "/api/agente/apartar",
+        inscripcionUrl: "/api/inscripcion",
+      },
+    });
+  }
+
+  if (ruta === "/api/agente/oferta.json" && req.method === "GET") {
+    const escuela = validarEscuelaAgente(url.searchParams.get("escuela"));
+    const { leads } = await tablero(env, escuela).estado();
+    return json(construirOfertaAgente(env, url.origin, leads, escuela));
+  }
+
+  if (
+    req.method === "GET" &&
+    (ruta === "/api/agente/apartar" ||
+      ruta === "/api/inscripcion" ||
+      ruta.startsWith("/api/agente/apartar/") ||
+      ruta.startsWith("/api/inscripcion/"))
+  ) {
+    const prefijo = ruta.startsWith("/api/agente/apartar/")
+      ? "/api/agente/apartar/"
+      : ruta.startsWith("/api/inscripcion/")
+        ? "/api/inscripcion/"
+        : "";
+    const tokenPath = prefijo ? decodeURIComponent(ruta.slice(prefijo.length)) : "";
+    const tokenCrudo = tokenPath || url.searchParams.get("payment_token") || url.searchParams.get("token") || "";
+    if (!tokenCrudo) throw new ErrorHttp(400, "falta payment_token");
+    return await consultarApartadoAgente({
+      tokenCrudo,
+      escuelaFallback: url.searchParams.get("escuela") ?? ESCUELA_AGENTE_DEFAULT,
+      env,
+      origen: url.origin,
+      obtenerAlmacen: (e) => tablero(env, e),
+      pagos: pagos(env),
     });
   }
 
@@ -417,6 +464,24 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
 
   if (req.method !== "POST") return json({ error: "Método no permitido" }, 405);
   const body = await leerJson(req);
+
+  if (ruta === "/api/agente/apartar" || ruta === "/api/inscripcion") {
+    return await procesarApartadoAgente({
+      req,
+      body,
+      url,
+      env,
+      obtenerAlmacen: (e) => tablero(env, e),
+      pagos: pagos(env),
+    });
+  }
+
+  if (ruta === "/api/demo/aceptar" && !body.escuela && (body.payment_token || body.token)) {
+    const { escuela: esc, busqueda } = desglosarTokenPago(String(body.payment_token ?? body.token));
+    body.escuela = esc;
+    body.leadId ||= busqueda;
+  }
+
   const escuela = escuelaDe(body.escuela);
   const t = tablero(env, escuela);
 
@@ -555,6 +620,20 @@ export default {
       }
       if (url.pathname === "/webhooks/whatsapp-flow") {
         return req.method === "POST" ? await webhookFlow(req, env) : json({ error: "Usa POST" }, 405);
+      }
+      if (url.pathname === "/agente/oferta.json") {
+        if (req.method !== "GET") return json({ error: "Usa GET" }, 405);
+        const escuela = validarEscuelaAgente(url.searchParams.get("escuela"));
+        const { leads } = await tablero(env, escuela).estado();
+        return json(construirOfertaAgente(env, url.origin, leads, escuela));
+      }
+      if (url.pathname === "/llms.txt") {
+        if (req.method !== "GET") return json({ error: "Usa GET" }, 405);
+        const escuela = validarEscuelaAgente(url.searchParams.get("escuela"));
+        const { leads } = await tablero(env, escuela).estado();
+        return new Response(construirLlmsTxt(env, url.origin, leads), {
+          headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
+        });
       }
       if (url.pathname.startsWith("/api/")) return await api(req, env, url);
       return env.ASSETS.fetch(req);

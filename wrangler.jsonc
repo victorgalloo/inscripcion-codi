@@ -8,7 +8,7 @@
   "assets": {
     "directory": "./public",
     "binding": "ASSETS",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": ["/api/*", "/agente/*", "/llms.txt"]
   },
   "durable_objects": {
     "bindings": [{ "name": "TABLERO", "class_name": "Tablero" }]

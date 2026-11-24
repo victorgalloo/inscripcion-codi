@@ -152,8 +152,12 @@ export class Tablero extends DurableObject<EnvPagos> {
     return this.publico(t);
   }
 
-  async crearLeadDemo(lead: Lead, celular: string): Promise<Lead> {
+  async crearLeadDemo(lead: Lead, celular: string, escuela?: string): Promise<Lead> {
     const t = await this.leer();
+    if (escuela && !t.escuela) {
+      t.escuela = escuela;
+      if (!t.leads.length) t.leads = leadsDeEjemplo();
+    }
     t.leads = [lead, ...t.leads.filter((l) => l.id !== lead.id)];
     t.celulares[lead.id] = celular;
     t.bitacora.push({ en: Date.now(), tipo: "crm", texto: `Nuevo lead por WhatsApp: ${lead.familia}`, ok: true });

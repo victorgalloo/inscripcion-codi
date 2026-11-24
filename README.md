@@ -215,7 +215,8 @@ WA_APP_SECRET=… node scripts/enviar-flow.mjs --url http://localhost:8787 --fir
 ```
 public/                     Una sola pantalla: WhatsApp + app bancaria + tablero (HTML/CSS/JS sin framework)
 public/contacto.js          Modo «Cobrar a un contacto»: WhatsApp Flow, celular del contacto y avisos
-src/worker.ts               Rutas /api/*, /webhooks/codi y /webhooks/whatsapp-flow
+src/worker.ts               Rutas /api/*, /agente/oferta.json, /llms.txt, /webhooks/codi y /webhooks/whatsapp-flow
+src/agente.ts               Oferta legible por agentes (/agente/oferta.json, /llms.txt) y flujo HTTP 402 CoDi en MXN
 src/whatsapp-flow.ts        Endpoint de WhatsApp Flows: firma de Meta, RSA-OAEP + AES-GCM, formulario de cobro
 src/pagos/tipos.ts          Interfaz PagosCoDi + validaciones CoDi y política del cobro
 src/pagos/mock.ts           CoDi simulado (emite webhooks con la misma forma que Pey)
@@ -308,10 +309,20 @@ node -e "console.log('CODI_WEBHOOK_SECRET=whsec_'+require('crypto').randomBytes(
 # modo «Cobrar a un contacto»: llave RSA (PKCS#8 en base64, una línea) y app secret de demo
 node -e "const c=require('crypto');const k=c.generateKeyPairSync('rsa',{modulusLength:2048}).privateKey.export({type:'pkcs8',format:'der'});console.log('WA_FLOW_PRIVATE_KEY='+k.toString('base64')+'\nWA_APP_SECRET='+c.randomBytes(24).toString('hex'))" >> .dev.vars
 npm run dev          # http://localhost:8787
-npm test             # 64 pruebas: firmas, conciliación, vencimiento, política del cobro, contrato de Pey, mock, ntfy, WhatsApp Flow
+npm test             # 68 pruebas: firmas, conciliación, vencimiento, política, Pey, mock, ntfy, WhatsApp Flow, agentes 402
 npm run typecheck
 npx wrangler deploy  # y luego: npx wrangler secret put CODI_WEBHOOK_SECRET (y WA_FLOW_PRIVATE_KEY, WA_APP_SECRET)
 ```
+
+## Venta a agentes de IA: «402 en pesos con CoDi» (`/agente/oferta.json` y `/llms.txt`)
+
+Si quien busca colegio y pide apartar lugar es el **agente de IA de la familia** (ChatGPT, Claude, etc.), el colegio expone su oferta estructurada y cobra el apartado en **pesos mexicanos (MXN) sobre CoDi sin comisión** mediante el patrón **`HTTP 402 Payment Required`** (inspirado en x402, con autorización humana en la app bancaria del padre o tutor):
+
+- **`GET /agente/oferta.json`** y **`GET /llms.txt`**: publican los programas (`kinder-2`, `1-primaria`, `2-primaria`, `3-primaria`, `1-secundaria`), colegiaturas mensuales, cupo disponible en tiempo real, razón social del beneficiario CoDi y cómo invocar el apartado.
+- **`POST /api/agente/apartar`** (alias **`POST /api/inscripcion`**):
+  1. **Sin transacción pagada:** crea el lead en el tablero, emite el Mensaje de Cobro CoDi (simulado en la demo pública; **$0.01 MXN** reales contra `api.pey.mx` en `inscripcion-codi-pey`) y responde **`HTTP 402 Payment Required`** con `amount_mxn`, `currency: "MXN"`, `rail: "CoDi"`, `commission_pct: 0`, `codi_qr_id`, `qr_string`, `push_status`, `approval_url`, `poll_url` y `payment_token`.
+  2. **Autorización humana:** el padre o tutor aprueba el cobro con Face ID / huella en la app de su banco ($0 de comisión, directo a la CLABE).
+  3. **Con el pago conciliado:** al consultar `poll_url` (`GET /api/agente/apartar/{payment_token}`) o repetir `POST /api/agente/apartar` con `X-Payment-Token: <payment_token>`, responde **`HTTP 200 OK`** con `status: "inscrito"` y `etapa: "Inscrito · Pagado"`, descontando el lugar disponible en `/agente/oferta.json`.
 
 ## Modo pey: el API real, encendido (22-nov-2026)
 
