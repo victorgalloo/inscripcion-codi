@@ -216,6 +216,17 @@ async function confirmarEnChat(l) {
     "Tu lugar en 1° de primaria quedó <b>inscrito</b>. ¡Bienvenidos al Colegio Aurora!",
     700,
   );
+  // Agente facturador: la factura llega sola, sin que nadie la pida.
+  const f = l.factura;
+  if (f?.mensajeFamilia && f.factura) {
+    const liga = (formato) => `/api/facturas/${encodeURIComponent(f.factura.id)}/${formato}?escuela=${encodeURIComponent(escuela)}`;
+    await agente(
+      `${conBr(f.mensajeFamilia)}<br>📄 <a href="${liga("pdf")}" target="_blank" rel="noopener">PDF</a> · ` +
+      `<a href="${liga("xml")}" target="_blank" rel="noopener">XML</a>` +
+      (f.factura.proveedor === "mock" ? " <i>(muestra SIMULADA, sin validez fiscal)</i>" : ""),
+      1200,
+    );
+  }
 }
 
 // ── Tablero ──
@@ -240,6 +251,13 @@ function tarjeta(l) {
   } else if (l.etapa === "pagado" && l.pago) {
     detalle = `<div class="detalle">✓ ${pesos(l.pago.montoMXN)} · CoDi ${l.pago.medio === "push" ? "push" : "QR"}<br>sin comisión` +
       (l.pago.claveRastreo ? ` · rastreo ${esc(l.pago.claveRastreo)}` : "") + "</div>";
+    const f = l.factura;
+    if (f?.factura?.uuid) {
+      detalle += `<div class="detalle">🧾 CFDI ${esc(f.estado)} · ${f.factura.publicoEnGeneral ? "público en general" : esc(f.factura.receptor.rfc)}` +
+        ` · <a href="/api/facturas/${encodeURIComponent(f.factura.id)}/pdf?escuela=${encodeURIComponent(escuela)}" target="_blank" rel="noopener">PDF</a></div>`;
+    } else if (f?.estado === "error") {
+      detalle += `<div class="detalle vencido">⚠ factura sin timbrar · el colegio fue avisado</div>`;
+    }
   }
   const movido = etapaPrevia.has(l.id) && etapaPrevia.get(l.id) !== l.etapa;
   etapaPrevia.set(l.id, l.etapa);
@@ -254,7 +272,7 @@ function dibujar(estado) {
     return `<div class="col ${id}"><h3>${nombre}<span>${deEtapa.length}</span></h3>${deEtapa.map(tarjeta).join("")}</div>`;
   }).join("");
   $("#bitacora").innerHTML = estado.bitacora.slice(-7).reverse().map((e) =>
-    `<li class="${e.tipo === "webhook" || e.tipo === "ntfy" || e.tipo === "vencimiento" ? (e.ok ? "ok" : "error") : ""}"><time>${horaSeg(e.en)}</time>${esc(e.texto)}</li>`,
+    `<li class="${e.tipo === "webhook" || e.tipo === "ntfy" || e.tipo === "vencimiento" || e.tipo === "factura" ? (e.ok ? "ok" : "error") : ""}"><time>${horaSeg(e.en)}</time>${esc(e.texto)}</li>`,
   ).join("") || "<li>Escribe en el chat para empezar.</li>";
 
   const mio = estado.leads.find((l) => l.demo);

@@ -5,6 +5,9 @@
  *
  * La alarma del objeto hace dos cosas: revisa los cobros que vencieron sin webhook
  * (consulta al proveedor, ver src/vencimiento.ts) y borra la demo a las 24 h.
+ *
+ * Cuando la conciliación marca un lead como pagado, dispara al agente facturador
+ * (src/facturador.ts) y guarda la factura junto al cobro (Lead.factura).
  */
 import { DurableObject } from "cloudflare:workers";
 import { conciliar, type CobroActivo, type CobroContacto, type Etapa, type Lead, type Resultado } from "./conciliacion.ts";
@@ -12,10 +15,29 @@ import type { PagoRecibido } from "./pagos/tipos.ts";
 import { crearPagos, type EnvPagos } from "./pagos/fabrica.ts";
 import { ponerCobroNuevo, proximoVencimiento, revisarVencimiento, type RevisionVencimiento } from "./vencimiento.ts";
 import { leadsDeEjemplo } from "./demo.ts";
+import { configFacturador, crearFacturacion } from "./facturacion/fabrica.ts";
+import type {
+  ComplementoIEDU,
+  DatosFiscales,
+  EnvFacturacion,
+  EventoFactura,
+  RegistroFactura,
+  SolicitudCancelacion,
+} from "./facturacion/tipos.ts";
+import {
+  aplicarEventoFactura,
+  buscarFactura,
+  cancelarFactura,
+  facturarLead,
+  sustituirConDatosFiscales,
+  type ContextoFacturador,
+  type ResultadoFacturador,
+} from "./facturador.ts";
+import type { AlmacenFacturas } from "./facturas.ts";
 
 export interface Evento {
   en: number; // unix ms
-  tipo: "crm" | "cobro" | "webhook" | "ntfy" | "vencimiento" | "whatsapp";
+  tipo: "crm" | "cobro" | "webhook" | "ntfy" | "vencimiento" | "whatsapp" | "factura";
   texto: string;
   ok: boolean;
 }
@@ -41,7 +63,10 @@ type Lista = "leads" | "contactos";
 const VACIO: Guardado = { escuela: "", leads: [], contactos: [], bitacora: [], webhooks: [], celulares: {}, flowTokens: {} };
 const DIA_MS = 24 * 3600 * 1000;
 
-export class Tablero extends DurableObject<EnvPagos> {
+export class Tablero extends DurableObject<EnvPagos & EnvFacturacion> implements AlmacenFacturas {
+  /** Leads que la revisión de vencimiento encontró pagados: se facturan tras guardar. */
+  private porFacturar: string[] = [];
+
   private async leer(): Promise<Guardado> {
     const t = (await this.ctx.storage.get<Guardado>("tablero")) ?? structuredClone(VACIO);
     t.contactos ??= []; // tableros guardados antes del modo «Cobrar a un contacto»
@@ -72,6 +97,7 @@ export class Tablero extends DurableObject<EnvPagos> {
     }
     await this.revisarVencidos(t);
     await this.guardar(t, false);
+    await this.facturarPorFacturar();
   }
 
   /** Revisa los cobros vencidos (o solo el de un lead) y aplica el resultado en t. */
@@ -108,6 +134,7 @@ export class Tablero extends DurableObject<EnvPagos> {
       } else if (r.tipo === "pagado_sin_webhook") {
         const { leads, resultado } = conciliar(t[lista], r.pago, Date.now());
         poner(leads);
+        if (resultado.tipo === "conciliado" && lista === "leads") this.porFacturar.push(resultado.leadId);
         t.bitacora.push({
           en: Date.now(),
           tipo: "vencimiento",
@@ -196,18 +223,25 @@ export class Tablero extends DurableObject<EnvPagos> {
    * MISMA revisión que la alarma: consulta al proveedor y marca «vencido o rechazado».
    */
   async vencerAhora(leadId: string): Promise<{ resultado: RevisionVencimiento["tipo"]; lead?: Lead }> {
-    const t = await this.leer();
+    let t = await this.leer();
     const ahora = Math.floor(Date.now() / 1000);
     t.leads = t.leads.map((l) =>
       l.id === leadId && l.cobro ? { ...l, cobro: { ...l.cobro, expiraEn: Math.min(l.cobro.expiraEn, ahora) } } : l,
     );
     const [r] = await this.revisarVencidos(t, leadId);
     await this.guardar(t);
+    if (await this.facturarPorFacturar()) t = await this.leer();
     return { resultado: r?.tipo ?? "sin_cambio", lead: t.leads.find((l) => l.id === leadId) };
   }
 
-  /** Aplica un pago verificado. Idempotente por webhook-id y por transacción. */
-  async aplicarPago(webhookId: string, pago: PagoRecibido): Promise<{ resultado: Resultado; lead?: Lead }> {
+  /**
+   * Aplica un pago verificado. Idempotente por webhook-id y por transacción.
+   * Si quedó conciliado, el agente facturador timbra la factura (un pago = una factura).
+   */
+  async aplicarPago(
+    webhookId: string,
+    pago: PagoRecibido,
+  ): Promise<{ resultado: Resultado; lead?: Lead; factura?: ResultadoFacturador }> {
     const t = await this.leer();
     // Los cobros del WhatsApp Flow traen cobroContactoId en los metadatos; los de inscripción, leadId.
     const lista: Lista = pago.metadatos.cobroContactoId ? "contactos" : "leads";
@@ -239,9 +273,87 @@ export class Tablero extends DurableObject<EnvPagos> {
         console.warn("Pago CoDi sin cobro", JSON.stringify({ webhookId, referencia: pago.referencia, montoMXN: pago.montoMXN }));
     }
     t.bitacora.push({ en: Date.now(), tipo: "webhook", texto, ok: resultado.tipo === "conciliado" });
+    // Se guarda el pago ANTES de facturar: el cobro nunca depende de la factura.
     await this.guardar(t);
     const leadId = "leadId" in resultado ? resultado.leadId : undefined;
-    return { resultado, lead: (t[lista] as Lead[]).find((l) => l.id === leadId) };
+    let factura: ResultadoFacturador | undefined;
+    let final = t;
+    if (resultado.tipo === "conciliado" && lista === "leads") {
+      factura = await this.facturarSinRomper(resultado.leadId);
+      final = await this.leer();
+    }
+    return { resultado, lead: (final[lista] as Lead[]).find((l) => l.id === leadId), ...(factura ? { factura } : {}) };
+  }
+
+  // ───────── agente facturador ─────────
+
+  /** El agente facturador sobre el storage de este objeto. */
+  private async contextoFacturador(): Promise<ContextoFacturador> {
+    const t = await this.leer();
+    return {
+      repo: {
+        leads: async () => (await this.leer()).leads,
+        guardarRegistro: async (leadId: string, registro: RegistroFactura) => {
+          const u = await this.leer();
+          u.leads = u.leads.map((l) => (l.id === leadId ? { ...l, factura: registro } : l));
+          await this.guardar(u);
+        },
+        anotar: async (texto: string, ok: boolean) => {
+          const u = await this.leer();
+          u.bitacora.push({ en: Date.now(), tipo: "factura", texto, ok });
+          await this.guardar(u);
+        },
+      },
+      facturacion: crearFacturacion(this.env),
+      config: configFacturador(this.env),
+      escuelaId: t.escuela,
+    };
+  }
+
+  /** Factura tras conciliar. Un error de configuración o del proveedor NUNCA revierte el cobro. */
+  private async facturarSinRomper(leadId: string): Promise<ResultadoFacturador | undefined> {
+    try {
+      return await facturarLead(await this.contextoFacturador(), leadId);
+    } catch (e) {
+      console.warn("No se pudo facturar el pago", leadId, (e as Error).message);
+      await this.anotar({ tipo: "factura", texto: `No se pudo facturar: ${(e as Error).message}`, ok: false });
+      return undefined;
+    }
+  }
+
+  private async facturarPorFacturar(): Promise<boolean> {
+    const ids = this.porFacturar.splice(0);
+    for (const id of ids) await this.facturarSinRomper(id);
+    return ids.length > 0;
+  }
+
+  async facturar(
+    leadId: string,
+    opciones: { datosFiscales?: DatosFiscales; iedu?: ComplementoIEDU; reintentar?: boolean } = {},
+  ) {
+    return facturarLead(await this.contextoFacturador(), leadId, opciones);
+  }
+
+  async sustituirFactura(leadId: string, datos: DatosFiscales, iedu?: ComplementoIEDU) {
+    return sustituirConDatosFiscales(await this.contextoFacturador(), leadId, datos, iedu);
+  }
+
+  async cancelarFactura(id: string, c: SolicitudCancelacion) {
+    return cancelarFactura(await this.contextoFacturador(), id, c);
+  }
+
+  async factura(id: string) {
+    const h = buscarFactura((await this.leer()).leads, id);
+    return h ? { leadId: h.lead.id, factura: h.factura, registro: h.lead.factura! } : undefined;
+  }
+
+  /** Webhook del proveedor de facturación. Idempotente por webhook-id. */
+  async eventoFactura(webhookId: string, evento: EventoFactura) {
+    const t = await this.leer();
+    if (t.webhooks.includes(webhookId)) return { tipo: "duplicado" as const };
+    t.webhooks.push(webhookId);
+    await this.guardar(t);
+    return aplicarEventoFactura((await this.contextoFacturador()).repo, evento);
   }
 
   // ───────── modo «Cobrar a un contacto» (WhatsApp Flow) ─────────

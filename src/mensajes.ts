@@ -60,3 +60,51 @@ export function mensajeAntesDelCobro(c: DatosCobroMensaje, razonSocial: string, 
     cierre,
   ].join("\n");
 }
+
+// ───────────────────────── factura (agente facturador) ─────────────────────────
+
+/** «30/11/2026» en la hora del centro de México. */
+export const fecha = (unixSeg: number, zona = ZONA_HORARIA) => fechaHora(unixSeg, zona).slice(0, 10);
+
+export interface DatosFacturaMensaje {
+  descripcion: string;
+  total: number;
+  uuid?: string;
+  publicoEnGeneral: boolean;
+  receptor: string;
+}
+
+/**
+ * La factura llega sola, sin que nadie la pida. Si salió a público en general, el mismo
+ * mensaje ofrece cambiarla a nombre de la familia dentro del mes (sustitución).
+ */
+export function mensajeFacturaLista(f: DatosFacturaMensaje, datosFiscalesHasta?: number, zona = ZONA_HORARIA): string {
+  const lineas = [
+    `🧾 Ya quedó tu factura de ${f.descripcion} por ${pesos(f.total)} (IVA exento, servicios educativos).`,
+    `Folio fiscal: ${f.uuid ?? "en proceso"}. Te dejo el PDF y el XML.`,
+  ];
+  if (f.publicoEnGeneral) {
+    lineas.push(
+      `Salió a «público en general» porque no tengo tus datos fiscales. Si la quieres a tu nombre, mándame${datosFiscalesHasta ? ` antes del ${fecha(datosFiscalesHasta, zona)}` : ""}: ` +
+        "RFC, nombre o razón social (como en tu constancia), código postal, régimen fiscal y uso del CFDI (p. ej. D10, servicios educativos). La cambio yo, no tienes que hacer nada más.",
+    );
+  } else {
+    lineas.push(`Está a nombre de ${f.receptor}.`);
+  }
+  return lineas.join("\n");
+}
+
+export function mensajeFacturaSustituida(f: DatosFacturaMensaje): string {
+  return [
+    `🧾 Listo: tu factura de ${f.descripcion} (${pesos(f.total)}) ya está a nombre de ${f.receptor}.`,
+    `Folio fiscal nuevo: ${f.uuid ?? "en proceso"}. La de público en general quedó cancelada y sustituida por esta.`,
+  ].join("\n");
+}
+
+/** Aviso al colegio cuando el proveedor de timbrado falla: el cobro NO se toca. */
+export function avisoFacturaAlColegio(familia: string, montoMXN: number, intentos: number, error: string): string {
+  return (
+    `No se pudo timbrar la factura de ${familia} (${pesos(montoMXN)}) tras ${intentos} intento${intentos === 1 ? "" : "s"}: ${error}. ` +
+    "El pago CoDi sigue conciliado. Emítela desde el tablero (POST /api/facturas) cuando el proveedor de facturación responda."
+  );
+}

@@ -7,6 +7,10 @@
  *                                     • sin pago conciliado → HTTP 402 Payment Required con cobro CoDi (QR o push)
  *                                     • con payment_token ya pagado → HTTP 200 OK («Inscrito · Pagado»)
  *   GET  /api/agente/apartar/:token   poll_url para verificar si la familia ya autorizó el cobro en su banco
+ *
+ * La factura (CFDI 4.0) llega sola al confirmarse el pago: la emite el agente facturador
+ * (src/facturador.ts). El agente de IA solo necesita POST /api/facturas/datos-fiscales si la
+ * familia la quiere a su nombre.
  */
 import { conciliar, nuevaReferencia, type CobroActivo, type Lead, type Resultado } from "./conciliacion.ts";
 import { CELULAR_DEMO, ESCUELA_DEMO, VIGENCIA_SEGUNDOS, leadsDeEjemplo } from "./demo.ts";
@@ -240,6 +244,27 @@ export function construirOfertaAgente(
       apartar: `${origen}/api/agente/apartar`,
       inscripcion_alias: `${origen}/api/inscripcion`,
       poll_apartado: `${origen}/api/agente/apartar/{payment_token}`,
+      datos_fiscales: `${origen}/api/facturas/datos-fiscales`,
+      factura: `${origen}/api/facturas/{factura_id}?escuela={escuela}`,
+    },
+    facturacion: {
+      automatica: true,
+      cfdi: "4.0",
+      tipo_comprobante: "I (ingreso)",
+      cuando: "En cuanto la conciliación confirma el pago CoDi; nadie la pide ni la captura. Llega a la familia por WhatsApp con PDF y XML.",
+      forma_pago: "03 (transferencia electrónica; CoDi viaja por SPEI)",
+      metodo_pago: "PUE",
+      moneda: "MXN",
+      iva: "exento (servicios de enseñanza con validez oficial, Ley del IVA art. 15 fracc. IV)",
+      sin_datos_fiscales: "público en general: RFC XAXX010101000, uso S01, régimen 616",
+      a_nombre_de_la_familia: {
+        endpoint: `${origen}/api/facturas/datos-fiscales`,
+        metodo: "POST",
+        campos: ["escuela", "leadId", "rfc", "nombre", "codigoPostal", "regimenFiscal", "usoCfdi"],
+        plazo: "dentro del mes de emisión; se sustituye la de público en general (relación 04, cancelación motivo 01)",
+      },
+      complemento_iedu: "opcional (nombre del alumno, CURP, nivel y clave de validez oficial); no se guarda",
+      proveedor: env.FACTURACION_PROVEEDOR ?? "mock",
     },
     flujo_402_codi: [
       {
@@ -317,6 +342,12 @@ export function construirLlmsTxt(env: EnvModo, origen: string, leads: Lead[] = l
     "### Paso 3: Confirmar la inscripción (`HTTP 200 OK`)",
     `Una vez autorizado el cobro, el agente consulta \`GET ${origen}/api/agente/apartar/{payment_token}\` o repite \`POST ${origen}/api/agente/apartar\` enviando el encabezado \`X-Payment-Token: {payment_token}\` (o \`"payment_token"\` en el cuerpo JSON).`,
     "El servidor responde **`HTTP 200 OK`** con `status: \"inscrito\"` y `etapa: \"Inscrito · Pagado\"`.",
+    "",
+    "## Factura (CFDI 4.0): llega sola",
+    "En cuanto se concilia el pago, el agente facturador timbra la factura de ingreso (forma de pago 03, método PUE, MXN, IVA exento por ser servicios educativos) y se la manda a la familia por WhatsApp con PDF y XML. No hay que pedirla.",
+    "- Sin datos fiscales sale a **público en general** (RFC `XAXX010101000`, uso `S01`, régimen `616`).",
+    `- Para tenerla a nombre de la familia dentro del mes: \`POST ${origen}/api/facturas/datos-fiscales\` con \`{ escuela, leadId, rfc, nombre, codigoPostal, regimenFiscal, usoCfdi }\`. Se timbra la nueva y se cancela la anterior (sustitución).`,
+    `- Consultar: \`GET ${origen}/api/facturas/{factura_id}?escuela={escuela}\` (también \`/pdf\` y \`/xml\`).`,
     "",
   ].join("\n");
 }

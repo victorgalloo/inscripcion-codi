@@ -4,6 +4,7 @@
  * poder probarla en Node y reutilizarla en el Durable Object del tablero.
  */
 import type { PagoRecibido, Proveedor } from "./pagos/tipos.ts";
+import type { RegistroFactura } from "./facturacion/tipos.ts";
 
 export type Etapa = "nuevo" | "informes" | "cobro_enviado" | "pagado" | "revision";
 
@@ -64,6 +65,8 @@ export interface Lead {
     clabeOrdenante?: string;
     conciliadoEn: number;
   };
+  /** CFDI que emitió el agente facturador al conciliarse el pago (src/facturador.ts). */
+  factura?: RegistroFactura;
   nota?: string;
 }
 

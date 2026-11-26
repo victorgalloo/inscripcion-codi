@@ -14,6 +14,8 @@ export interface EnvModo {
   PEY_CELULAR_PRUEBA?: string;
   /** Titular real de la CLABE ligada a la API key: es el «Beneficiario» que ve quien paga. */
   PEY_BENEFICIARIO?: string;
+  /** Proveedor de facturación activo (solo se informa en la oferta para agentes). */
+  FACTURACION_PROVEEDOR?: "mock" | "http";
 }
 
 /** El beneficiario que se le dice a la familia debe ser el titular REAL de la CLABE que cobra. */

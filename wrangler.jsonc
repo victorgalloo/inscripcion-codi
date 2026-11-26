@@ -19,6 +19,9 @@
   "vars": {
     // "mock" = CoDi simulado (demo pública). "pey" = API real de Pey (requiere secretos).
     "PAGOS_PROVEEDOR": "mock",
+    // "mock" = timbrado SIMULADO (PDF/XML de muestra sin validez fiscal). "http" = cualquier proveedor de
+    // timbrado detrás de FACTURACION_URL con el contrato de src/facturacion/tipos.ts (requiere secretos).
+    "FACTURACION_PROVEEDOR": "mock",
     // Tema PÚBLICO de ntfy para la demo: cualquiera que lo conozca recibe los avisos.
     // En producción: un tema por colegio con token de acceso (secreto NTFY_TOKEN).
     "NTFY_TEMA": "inscripcion-codi-vmjgfbix3cnxl74b",
@@ -38,6 +41,8 @@
       "services": [{ "binding": "YO", "service": "inscripcion-codi-pey" }],
       "vars": {
         "PAGOS_PROVEEDOR": "pey",
+        // La factura sigue simulada en este ambiente: no se conecta ningún proveedor de timbrado.
+        "FACTURACION_PROVEEDOR": "mock",
         "PEY_MONTO_PRUEBA_MXN": "0.01",
         // Titular de la CLABE de pruebas de pey (docs.pey.mx, «Crear una API key»): es quien recibe el $0.01.
         "PEY_BENEFICIARIO": "Ramón Orraca Lascurain (CLABE de pruebas de pey)",
@@ -57,4 +62,11 @@
   //   npx wrangler secret put PEY_API_KEY           (solo modo "pey")
   //   PEY_BANK_ACCOUNT_ID (var o secreto, modo "pey"): bankAccountId de la CLABE del colegio; el dinero cae directo ahí
   //   npx wrangler secret put NTFY_TOKEN            (opcional, temas privados)
+  // Facturación (solo FACTURACION_PROVEEDOR="http"; los dos primeros también pueden venir de la bóveda):
+  //   npx wrangler secret put FACTURACION_API_KEY           llave del proveedor de timbrado
+  //   npx wrangler secret put FACTURACION_WEBHOOK_SECRET    whsec_… para POST /webhooks/facturacion
+  //   FACTURACION_URL (var): base del proveedor o del traductor que habla el contrato canónico
+  //   Opcionales (var): FACTURACION_AUTH_CABECERA, FACTURACION_AUTH_PREFIJO, FACTURACION_RUTA_EMITIR,
+  //   FACTURACION_RUTA_CONSULTAR, FACTURACION_RUTA_CANCELAR, FACTURACION_RUTA_ARCHIVO,
+  //   FACTURACION_EMISOR_RFC / _NOMBRE / _REGIMEN / _CP y FACTURACION_CLAVES_PRODSERV (JSON nivel → clave SAT)
 }

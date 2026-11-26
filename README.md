@@ -37,6 +37,7 @@ En un colegio privado, el momento más frágil de la admisión es el paso de *«
 5. El proveedor (Pey) avisa por **webhook firmado** a `POST /webhooks/codi`.
 6. El Worker verifica la firma, descarta `webhook-id` repetidos y **compara monto y referencia con el cobro original**. Si coinciden, mueve el lead a **«Inscrito · Pagado»**. Si no, rechaza el pago, lo deja en revisión y lo registra en la bitácora y el log.
 7. Sale un **push con ntfy** al colegio («Familia X inscrita y pagada») y otro a la familia con el Folio CoDi, la clave de rastreo y la CLABE enmascarada. En la demo, el de la familia es simulado.
+8. El **agente facturador** timbra solo la factura (CFDI 4.0 de ingreso) de ese pago y se la manda a la familia por WhatsApp con PDF y XML. Ver [Factura automática](#factura-automática-el-agente-facturador).
 
 **Respaldo:** si la familia rechaza el push o no le llega, el agente manda un **QR CoDi** en el chat (o una liga de pago). Es un cobro nuevo, con referencia nueva y el mismo monto.
 
@@ -179,6 +180,29 @@ WA_APP_SECRET=… node scripts/enviar-flow.mjs --url http://localhost:8787 --fir
 5. Manda el Flow con Cloud API: `type: "interactive"`, `interactive.type: "flow"`, con `flow_id`, un `flow_token` de `nuevoFlowToken()` y `flow_action: "data_exchange"`.
 6. Quita el filtro de números `0000` (`soloFicticios`) y usa `PAGOS_PROVEEDOR = "pey"`.
 
+## Factura automática: el agente facturador
+
+Tercer agente de la cadena **adopción → cobranza → conciliación → factura**. Nadie pide la factura ni la captura: en cuanto la conciliación marca el cobro como pagado (webhook CoDi, el «Aceptar» de la demo o la consulta al vencer), el `Tablero` llama a `src/facturador.ts`, que arma el CFDI, lo timbra con el proveedor configurado y guarda la factura junto al cobro (`lead.factura`, visible en `/api/tablero`).
+
+- **CFDI 4.0 de ingreso:** forma de pago `03` (transferencia; CoDi viaja por SPEI), método `PUE`, moneda MXN, unidad `E48`. Colegiaturas e inscripciones **exentas de IVA** (Ley del IVA, art. 15, fracc. IV): objeto de impuesto `02`, traslado `002` tipo factor `Exento`, total = subtotal.
+- **Sin datos fiscales → público en general** (`XAXX010101000`, uso `S01`, régimen `616`, CP del colegio). El mismo WhatsApp ofrece cambiarla a nombre de la familia **dentro del mes**: con RFC, nombre, CP, régimen y uso se timbra la nueva relacionada (tipo `04`) y se cancela la anterior con motivo `01` y el folio de la nueva.
+- **Un pago = una factura:** la llave es el id de la transacción CoDi (y viaja como `Idempotency-Key`). Un webhook repetido no timbra dos veces.
+- **Si el proveedor falla:** reintento con espera creciente (1 s, 3 s); al tercer fallo, aviso al colegio por ntfy y bitácora. **El cobro nunca se revierte** por un fallo de factura.
+- **Complemento IEDU** (nombre del alumno, CURP, nivel, clave de validez oficial): opcional por concepto. Viaja al proveedor y no se guarda.
+- **Clave de producto o servicio por nivel:** no la fijamos en el código porque no pudimos confirmarla contra el catálogo vigente del SAT. Cada colegio la pone en `FACTURACION_CLAVES_PRODSERV` (JSON nivel → clave) con su contador; mientras tanto sale `01010101` («No existe en el catálogo»).
+
+Endpoints propios, iguales para cualquier proveedor:
+
+| Ruta | Para qué |
+|---|---|
+| `POST /api/facturas` | Emitir a mano o reintentar; con `datosFiscales`, re-facturar a nombre de la familia |
+| `GET /api/facturas/:id` · `/pdf` · `/xml` | La factura y sus archivos (`?escuela=…`) |
+| `POST /api/facturas/:id/cancelar` | Cancelar con motivo SAT (`01` exige `folioSustitucion`) |
+| `POST /api/facturas/datos-fiscales` | La familia entrega sus datos → sustitución |
+| `POST /webhooks/facturacion` | El proveedor avisa `factura.timbrada` / `.cancelada` / `.rechazada` (Standard Webhooks, `FACTURACION_WEBHOOK_SECRET`) |
+
+**Conectar un proveedor de timbrado** (PAC) es configuración, no código: `FACTURACION_PROVEEDOR="http"`, `FACTURACION_URL` y el secreto `FACTURACION_API_KEY` (texto o bóveda). La cabecera de autenticación (`Authorization: Bearer …` por defecto) y las rutas (`/facturas`, `/facturas/{id}`, `/facturas/{id}/cancelar`, `/facturas/{id}/{formato}`) se cambian con `FACTURACION_AUTH_*` y `FACTURACION_RUTA_*`. El adaptador manda el contrato canónico de `src/facturacion/tipos.ts` y espera la respuesta canónica; si el proveedor habla otro dialecto, se pone un traductor delgado detrás de esa URL o se escribe una clase que implemente `Facturacion`. En la demo, `FACTURACION_PROVEEDOR="mock"`: UUID con forma real y PDF/XML de muestra marcados **«SIMULADO, sin validez fiscal»**.
+
 ## Prueba la demo en 30 segundos
 
 1. Abre https://inscripcion-codi.noisy-shape-4fc9.workers.dev
@@ -208,6 +232,8 @@ WA_APP_SECRET=… node scripts/enviar-flow.mjs --url http://localhost:8787 --fir
 | App bancaria (logo CoDi como marcador, Folio CoDi, beneficiario, monto, concepto, referencia, vigencia; Aceptar / Rechazar / Posponer) | **Simulada** |
 | Cobro CoDi (push y QR) | **Simulado** (`PagosCoDiMock`). El QR dice `DEMO`: no lo pagues con un banco real |
 | Adaptador Pey (`PagosCoDiPey`) | **Escrito contra la OpenAPI pública de Pey** y probado con un `fetch` falso. **Aún no se prueba con una API key real** |
+| Factura CFDI 4.0 al conciliar el pago (agente facturador, idempotencia, reintentos, sustitución) | **Real** la lógica; el **timbrado es simulado** (`FacturacionMock`): PDF/XML de muestra sin validez fiscal |
+| Adaptador genérico de timbrado por HTTP (`FacturacionHttp`) | Probado con un `fetch` falso. **No está conectado a ningún proveedor** |
 | Escuela, familias, montos y celular (`0000000042`) | **Ficticios** |
 
 ## Arquitectura
@@ -226,11 +252,17 @@ src/vencimiento.ts          Revisión al vencer: consulta el estado y marca «ve
 src/mensajes.ts             Lo que el agente le dice a la familia antes del cobro + aviso de privacidad
 src/webhooks.ts             Firma y verificación Standard Webhooks (WebCrypto)
 src/conciliacion.ts         Lógica pura de conciliación
-src/tablero.ts              Durable Object: CRM de admisiones por escuela
+src/tablero.ts              Durable Object: CRM de admisiones por escuela (dispara al facturador al conciliar)
+src/facturador.ts           Agente facturador: arma y timbra el CFDI 4.0, idempotencia, reintentos y sustitución
+src/facturas.ts             Rutas /api/facturas* y /webhooks/facturacion
+src/facturacion/tipos.ts    Interfaz Facturacion + contrato canónico (solicitud, factura, evento)
+src/facturacion/mock.ts     Timbrado simulado con PDF/XML de muestra
+src/facturacion/http.ts     Adaptador genérico para cualquier proveedor de timbrado por HTTP
+src/facturacion/fabrica.ts  Elige mock o http y arma el emisor desde las variables
 src/ntfy.ts                 Publicación de avisos push
 scripts/enviar-webhook.mjs  Manda un webhook firmado para probar
 scripts/enviar-flow.mjs     Manda un data_exchange de WhatsApp Flow cifrado y firmado, como Meta
-test/                       59 pruebas (node --test)
+test/                       120 pruebas (node --test)
 docs/whatsapp-flow.json     Flow JSON de «Cobrar con CoDi»
 docs/regulacion.md          Regulación CoDi (Banxico, CNBV, LFPDPPP) y cómo la aplica la demo
 ```

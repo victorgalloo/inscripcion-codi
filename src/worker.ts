@@ -22,6 +22,11 @@
  *   POST /webhooks/whatsapp-flow   endpoint data_exchange del Flow (forma de Meta): firma → descifra →
  *                                  valida → PagosCoDi.crearCobroPush(celular, …) → respuesta cifrada
  *   GET  /api/whatsapp-flow/llave-publica   la llave pública (la que el negocio sube a Meta)
+ *
+ * Agente facturador (CFDI 4.0, cualquier proveedor de timbrado; ver src/facturas.ts):
+ *   POST /api/facturas · GET /api/facturas/:id · GET /api/facturas/:id/pdf · GET /api/facturas/:id/xml
+ *   POST /api/facturas/:id/cancelar · POST /api/facturas/datos-fiscales
+ *   POST /webhooks/facturacion     el proveedor avisa timbrada / cancelada / rechazada (Standard Webhooks)
  */
 import { Tablero, type EstadoTablero } from "./tablero.ts";
 import { nuevaReferencia, type CobroActivo, type Lead } from "./conciliacion.ts";
@@ -63,10 +68,13 @@ import {
   procesarApartadoAgente,
   validarEscuelaAgente,
 } from "./agente.ts";
+import { crearFacturacion, secretoWebhookFacturacion } from "./facturacion/fabrica.ts";
+import type { EnvFacturacion } from "./facturacion/tipos.ts";
+import { rutasFacturas, webhookFacturacion, type AlmacenFacturas } from "./facturas.ts";
 
 export { Tablero };
 
-export interface Env {
+export interface Env extends EnvFacturacion {
   ASSETS: Fetcher;
   TABLERO: DurableObjectNamespace<Tablero>;
   /** Este mismo Worker (service binding) para entregar el webhook de la demo por HTTP. */
@@ -148,7 +156,7 @@ async function webhookCodi(req: Request, env: Env): Promise<Response> {
   if (!ESCUELA_RE.test(escuela)) return json({ error: "metadatos.escuelaId ausente" }, 422);
 
   const t = tablero(env, escuela);
-  const { resultado, lead } = await t.aplicarPago(v.id, pago);
+  const { resultado, lead, factura } = await t.aplicarPago(v.id, pago);
 
   // ntfy SOLO si: firma ✓ (arriba), webhook-id nuevo, y monto + referencia iguales al cobro original.
   const avisos: ResultadoNtfy[] = [];
@@ -215,7 +223,28 @@ async function webhookCodi(req: Request, env: Env): Promise<Response> {
       });
     }
   }
-  return json({ ok: true, webhookId: v.id, resultado, ntfy: avisos.map((a) => ({ status: a.status, id: a.id, error: a.error })) });
+  // Agente facturador: si el proveedor de timbrado falló 3 veces, se avisa al colegio (el cobro sigue pagado).
+  if (factura?.tipo === "escalada" && env.NTFY_TEMA) {
+    const a = await publicarNtfy(
+      env.NTFY_TEMA,
+      {
+        titulo: "Colegio · factura sin timbrar",
+        mensaje: factura.avisoColegio,
+        etiquetas: ["warning", "receipt"],
+        liga: `${new URL(req.url).origin}/?escuela=${escuela}`,
+        prioridad: 4,
+      },
+      { base: env.NTFY_BASE, token: env.NTFY_TOKEN },
+    );
+    avisos.push(a);
+  }
+  return json({
+    ok: true,
+    webhookId: v.id,
+    resultado,
+    factura: factura ? { tipo: factura.tipo, uuid: "registro" in factura ? factura.registro.factura?.uuid : undefined } : undefined,
+    ntfy: avisos.map((a) => ({ status: a.status, id: a.id, error: a.error })),
+  });
 }
 
 /** Entrega el webhook simulado por HTTP real (service binding a este mismo Worker). */
@@ -412,6 +441,10 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
       webhookConfigurado: Boolean(env.CODI_WEBHOOK_SECRET || env.PEY_WEBHOOK_SECRET_TEST),
       flowConfigurado: Boolean(env.WA_FLOW_PRIVATE_KEY && env.WA_APP_SECRET),
       contactos: CONTACTOS_DEMO.map((c) => ({ id: c.id, nombre: c.nombre, celular: enmascararCelular(c.celular) })),
+      facturacion: {
+        proveedor: env.FACTURACION_PROVEEDOR ?? "mock",
+        webhookConfigurado: Boolean(env.FACTURACION_WEBHOOK_SECRET),
+      },
       agente: {
         protocolo: "x402-codi-mxn",
         ofertaUrl: "/agente/oferta.json",
@@ -462,6 +495,20 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
     return json(await tablero(env, escuela).estado());
   }
 
+  if (req.method === "GET" && ruta.startsWith("/api/facturas/")) {
+    const escuela = escuelaDe(url.searchParams.get("escuela"));
+    const r = await rutasFacturas({
+      metodo: "GET",
+      ruta,
+      body: {},
+      escuela,
+      origen: url.origin,
+      almacen: tablero(env, escuela) as unknown as AlmacenFacturas,
+      facturacion: crearFacturacion(env),
+    });
+    if (r) return r;
+  }
+
   if (req.method !== "POST") return json({ error: "Método no permitido" }, 405);
   const body = await leerJson(req);
 
@@ -484,6 +531,17 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
 
   const escuela = escuelaDe(body.escuela);
   const t = tablero(env, escuela);
+
+  const facturas = ruta.startsWith("/api/facturas") && await rutasFacturas({
+    metodo: "POST",
+    ruta,
+    body,
+    escuela,
+    origen: url.origin,
+    almacen: t as unknown as AlmacenFacturas,
+    facturacion: crearFacturacion(env),
+  });
+  if (facturas) return facturas;
 
   if (ruta === "/api/demo/iniciar") {
     const actual: EstadoTablero = await t.estado();
@@ -617,6 +675,14 @@ export default {
     try {
       if (url.pathname === "/webhooks/codi") {
         return req.method === "POST" ? await webhookCodi(req, env) : json({ error: "Usa POST" }, 405);
+      }
+      if (url.pathname === "/webhooks/facturacion") {
+        if (req.method !== "POST") return json({ error: "Usa POST" }, 405);
+        return await webhookFacturacion(req, {
+          secreto: await secretoWebhookFacturacion(env),
+          obtenerAlmacen: (e) => tablero(env, e) as unknown as AlmacenFacturas,
+          escuelaValida: (e) => ESCUELA_RE.test(e),
+        });
       }
       if (url.pathname === "/webhooks/whatsapp-flow") {
         return req.method === "POST" ? await webhookFlow(req, env) : json({ error: "Usa POST" }, 405);
