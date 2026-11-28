@@ -136,7 +136,8 @@ export function mensajePaso(p: PlanColegiatura, tipo: TipoPaso, mes: number): st
     case "aviso_previo":
       return `Hola 👋 El día ${p.diaDePago} te llega a la app de tu banco la solicitud CoDi de la colegiatura de ${m} de ${p.alumno} (${pesos(p.montoMXN)}).${desc} Solo tocas Aceptar.`;
     case "aviso_vispera":
-      return `Mañana a las 9:00 te llega la solicitud CoDi de la colegiatura de ${p.alumno}. Es de ${monto}, sin comisión.`;
+      // Mismo monto que traerá el push de mañana (con el descuento de pronto pago, si hay).
+      return `Mañana a las 9:00 te llega la solicitud CoDi de la colegiatura de ${p.alumno}. Es de ${pesos(montoDelPaso(p, "cobro_dia"))}, sin comisión.`;
     case "cobro_dia":
       return `Ya te llegó la solicitud CoDi de la colegiatura de ${m} de ${p.alumno} por ${monto}. Ábrela en tu banco y toca Aceptar.`;
     case "reintento_tarde":

@@ -167,11 +167,12 @@ export function conciliar(
 }
 
 /** Referencia numérica CoDi de 7 dígitos que no choque con otra pendiente. */
-export function nuevaReferencia(leads: Lead[], azar: () => number = Math.random): string {
+export function nuevaReferencia(leads: Lead[], azar: () => number = Math.random, otras: Iterable<string> = []): string {
   // Incluye las de cobros vencidos o sustituidos: una referencia nunca se reutiliza.
-  const usadas = new Set(
-    leads.flatMap((l) => [l.cobro, ...(l.cobrosAnteriores ?? [])].map((c) => c?.referencia)),
-  );
+  const usadas = new Set<string | undefined>([
+    ...leads.flatMap((l) => [l.cobro, ...(l.cobrosAnteriores ?? [])].map((c) => c?.referencia)),
+    ...otras,
+  ]);
   for (;;) {
     const r = String(1_000_000 + Math.floor(azar() * 9_000_000));
     if (!usadas.has(r)) return r;

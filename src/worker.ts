@@ -659,6 +659,42 @@ async function api(req: Request, env: Env, url: URL): Promise<Response> {
     return json({ webhook: await entregarWebhook(env, url.origin, evento) });
   }
 
+  // ───────── agente de cobranza: colegiatura del mes (demo con reloj a mano) ─────────
+  if (ruta.startsWith("/api/demo/colegiatura")) {
+    if (env.PAGOS_PROVEEDOR !== "mock") throw new ErrorHttp(403, "solo en modo mock");
+    const id = String(body.colegiaturaId ?? "");
+    if (ruta === "/api/demo/colegiaturas") {
+      // La colegiatura del mes siguiente (hora CDMX), para que todo el calendario quede por delante.
+      const hoy = new Date(Date.now() - 6 * 3600 * 1000);
+      const mes = (hoy.getUTCMonth() + 1) % 12 + 1;
+      const anio = hoy.getUTCFullYear() + (mes === 1 ? 1 : 0);
+      return json(await t.iniciarColegiaturas(anio, mes));
+    }
+    if (ruta === "/api/demo/colegiatura/avanzar") {
+      const r = await t.avanzarColegiatura(id);
+      if (!r.colegiatura) throw new ErrorHttp(404, "colegiatura no encontrada");
+      return json(r);
+    }
+    if (ruta === "/api/demo/colegiatura/activar-codi") {
+      const c = await t.activarCodiColegiatura(id);
+      if (!c) throw new ErrorHttp(404, "colegiatura no encontrada");
+      return json({ colegiatura: c });
+    }
+    if (ruta === "/api/demo/colegiatura/aceptar") {
+      if (!env.CODI_WEBHOOK_SECRET) throw new ErrorHttp(500, "CODI_WEBHOOK_SECRET no configurado");
+      const u = await t.ultimoCobroColegiatura(id);
+      if (!u) throw new ErrorHttp(404, "colegiatura no encontrada");
+      if (u.pagada) throw new ErrorHttp(409, "ya está pagada");
+      if (!u.cobro?.id) throw new ErrorHttp(409, "todavía no hay cobro CoDi de esta colegiatura");
+      const { id: cobroId, montoMXN, referencia, concepto = "" } = u.cobro;
+      const evento = new PagosCoDiMock().simularAceptacion(
+        { medio: "push", id: cobroId, montoMXN, concepto, referencia },
+        { escuelaId: escuela, colegiaturaId: id },
+      );
+      return json({ webhook: await entregarWebhook(env, url.origin, evento) });
+    }
+  }
+
   if (ruta === "/api/demo/vencer") {
     if (env.PAGOS_PROVEEDOR !== "mock") throw new ErrorHttp(403, "solo en modo mock");
     const { lead } = await t.lead(String(body.leadId ?? ""));

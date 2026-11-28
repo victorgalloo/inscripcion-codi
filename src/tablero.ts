@@ -6,6 +6,10 @@
  * La alarma del objeto hace dos cosas: revisa los cobros que vencieron sin webhook
  * (consulta al proveedor, ver src/vencimiento.ts) y borra la demo a las 24 h.
  *
+ * Agente de cobranza: también lleva la colegiatura del mes de cada familia
+ * (src/agenda-cobranza.ts). La alarma corre los pasos de las colegiaturas reales;
+ * las de la demo avanzan cuando quien prueba adelanta el reloj.
+ *
  * Cuando la conciliación marca un lead como pagado, dispara al agente facturador
  * (src/facturador.ts) y guarda la factura junto al cobro (Lead.factura).
  */
@@ -14,7 +18,25 @@ import { conciliar, type CobroActivo, type CobroContacto, type Etapa, type Lead,
 import type { PagoRecibido } from "./pagos/tipos.ts";
 import { crearPagos, type EnvPagos } from "./pagos/fabrica.ts";
 import { ponerCobroNuevo, proximoVencimiento, revisarVencimiento, type RevisionVencimiento } from "./vencimiento.ts";
-import { leadsDeEjemplo } from "./demo.ts";
+import { VIGENCIA_SEGUNDOS, leadsDeEjemplo, planesDeEjemplo } from "./demo.ts";
+import {
+  activarCodi,
+  avanzar,
+  conceptoColegiatura,
+  ejecutar,
+  marcarPagada,
+  nuevaColegiatura,
+  proximaAlarmaColegiaturas,
+  publica,
+  resumen,
+  type Colegiatura,
+  type EjecutorCobranza,
+  type ResumenCobranza,
+} from "./agenda-cobranza.ts";
+import { validarPoliticaCobro } from "./pagos/tipos.ts";
+import { nuevaReferencia } from "./conciliacion.ts";
+import { pesos } from "./mensajes.ts";
+import type { EnvModo } from "./modo.ts";
 import { configFacturador, crearFacturacion } from "./facturacion/fabrica.ts";
 import type {
   ComplementoIEDU,
@@ -48,9 +70,12 @@ export interface EstadoTablero {
   /** Modo «Cobrar a un contacto»: cobros CoDi mandados desde el WhatsApp Flow. */
   contactos: CobroContacto[];
   bitacora: Evento[];
+  /** Agente de cobranza: colegiaturas del mes (celular enmascarado). */
+  colegiaturas: Colegiatura[];
+  cobranza: ResumenCobranza;
 }
 
-interface Guardado extends EstadoTablero {
+interface Guardado extends Omit<EstadoTablero, "cobranza"> {
   webhooks: string[]; // webhook-id ya procesados (idempotencia)
   celulares: Record<string, string>; // leadId → celular (nunca sale al navegador)
   /** flow_token emitido → estado. Un Flow = un cobro: un token usado no vuelve a cobrar. */
@@ -60,10 +85,10 @@ interface Guardado extends EstadoTablero {
 
 type Lista = "leads" | "contactos";
 
-const VACIO: Guardado = { escuela: "", leads: [], contactos: [], bitacora: [], webhooks: [], celulares: {}, flowTokens: {} };
+const VACIO: Guardado = { escuela: "", leads: [], contactos: [], bitacora: [], colegiaturas: [], webhooks: [], celulares: {}, flowTokens: {} };
 const DIA_MS = 24 * 3600 * 1000;
 
-export class Tablero extends DurableObject<EnvPagos & EnvFacturacion> implements AlmacenFacturas {
+export class Tablero extends DurableObject<EnvPagos & EnvFacturacion & EnvModo> implements AlmacenFacturas {
   /** Leads que la revisión de vencimiento encontró pagados: se facturan tras guardar. */
   private porFacturar: string[] = [];
 
@@ -71,6 +96,7 @@ export class Tablero extends DurableObject<EnvPagos & EnvFacturacion> implements
     const t = (await this.ctx.storage.get<Guardado>("tablero")) ?? structuredClone(VACIO);
     t.contactos ??= []; // tableros guardados antes del modo «Cobrar a un contacto»
     t.flowTokens ??= {};
+    t.colegiaturas ??= [];
     return t;
   }
 
@@ -84,7 +110,9 @@ export class Tablero extends DurableObject<EnvPagos & EnvFacturacion> implements
     if (actividad || !t.limpiarEn) t.limpiarEn = Date.now() + DIA_MS;
     await this.ctx.storage.put("tablero", t);
     const vence = proximoVencimiento([...t.leads, ...t.contactos]);
-    let venceMs = vence === undefined ? Infinity : vence * 1000;
+    const paso = proximaAlarmaColegiaturas(t.colegiaturas, Math.floor(Date.now() / 1000));
+    const siguiente = Math.min(vence ?? Infinity, paso ?? Infinity);
+    let venceMs = siguiente === Infinity ? Infinity : siguiente * 1000;
     if (venceMs <= Date.now()) venceMs = Date.now() + 60_000; // ya venció y la consulta falló: reintenta en 1 min
     await this.ctx.storage.setAlarm(Math.min(venceMs, t.limpiarEn));
   }
@@ -96,6 +124,7 @@ export class Tablero extends DurableObject<EnvPagos & EnvFacturacion> implements
       return;
     }
     await this.revisarVencidos(t);
+    await this.correrColegiaturas(t);
     await this.guardar(t, false);
     await this.facturarPorFacturar();
   }
@@ -155,7 +184,14 @@ export class Tablero extends DurableObject<EnvPagos & EnvFacturacion> implements
   }
 
   private publico(t: Guardado): EstadoTablero {
-    return { escuela: t.escuela, leads: t.leads, contactos: t.contactos, bitacora: t.bitacora };
+    return {
+      escuela: t.escuela,
+      leads: t.leads,
+      contactos: t.contactos,
+      bitacora: t.bitacora,
+      colegiaturas: t.colegiaturas.map(publica),
+      cobranza: resumen(t.colegiaturas),
+    };
   }
 
   async estado(): Promise<EstadoTablero> {
@@ -242,6 +278,7 @@ export class Tablero extends DurableObject<EnvPagos & EnvFacturacion> implements
     webhookId: string,
     pago: PagoRecibido,
   ): Promise<{ resultado: Resultado; lead?: Lead; factura?: ResultadoFacturador }> {
+    if (pago.metadatos.colegiaturaId) return this.aplicarPagoColegiatura(webhookId, pago);
     const t = await this.leer();
     // Los cobros del WhatsApp Flow traen cobroContactoId en los metadatos; los de inscripción, leadId.
     const lista: Lista = pago.metadatos.cobroContactoId ? "contactos" : "leads";
@@ -283,6 +320,148 @@ export class Tablero extends DurableObject<EnvPagos & EnvFacturacion> implements
       final = await this.leer();
     }
     return { resultado, lead: (final[lista] as Lead[]).find((l) => l.id === leadId), ...(factura ? { factura } : {}) };
+  }
+
+  // ───────── agente de cobranza (colegiatura del mes) ─────────
+
+  /** Ejecutor del agente: cada paso que cobra manda un push CoDi NUEVO al celular de la familia. */
+  private ejecutorCobranza(t: Guardado): EjecutorCobranza {
+    return {
+      cobrar: async (c, paso, montoMXN) => {
+        // Con pey real el monto y el celular salen de la configuración de prueba ($0.01, celular de Victor):
+        // eso se conecta cuando haya un colegio real. Hoy el agente de cobranza corre en mock.
+        if (this.env.PAGOS_PROVEEDOR !== "mock") throw new Error("el agente de cobranza corre solo en modo mock por ahora");
+        const referencia = nuevaReferencia(
+          [...t.leads, ...t.contactos],
+          Math.random,
+          t.colegiaturas.flatMap((x) => x.cobros.map((k) => k.referencia)),
+        );
+        const concepto = conceptoColegiatura(c);
+        const solicitud = {
+          montoMXN,
+          concepto,
+          referencia,
+          vigenciaSegundos: VIGENCIA_SEGUNDOS,
+          metadatos: { escuelaId: t.escuela, colegiaturaId: c.id },
+        };
+        validarPoliticaCobro(solicitud, { montoConfirmadoMXN: montoMXN, datosPrivados: [c.plan.alumno] });
+        const cobro = await crearPagos(this.env).crearCobroPush(c.plan.celular, solicitud);
+        t.bitacora.push({
+          en: Date.now(),
+          tipo: "cobro",
+          texto: `Agente de cobranza · ${paso.tipo} · push CoDi nuevo a ${cobro.celular} · ${pesos(montoMXN)} · ref ${referencia}`,
+          ok: true,
+        });
+        return { referencia, id: cobro.transaccionId, concepto };
+      },
+    };
+  }
+
+  /** Alarma: corre el paso que toque de cada colegiatura real (las de demo no se mueven solas). */
+  private async correrColegiaturas(t: Guardado): Promise<void> {
+    const ahora = Math.floor(Date.now() / 1000);
+    for (const [i, c] of t.colegiaturas.entries()) {
+      if (c.demo || c.pagada) continue;
+      try {
+        const r = await ejecutar(c, ahora, this.ejecutorCobranza(t));
+        t.colegiaturas[i] = r.colegiatura;
+        if (r.paso) this.anotarPaso(t, r.colegiatura, r.paso.tipo);
+      } catch (e) {
+        t.bitacora.push({ en: Date.now(), tipo: "cobro", texto: `Agente de cobranza · error: ${(e as Error).message}`, ok: false });
+      }
+    }
+  }
+
+  private anotarPaso(t: Guardado, c: Colegiatura, tipo: string): void {
+    const m = c.mensajes.at(-1);
+    const quien = c.plan.alumno;
+    t.bitacora.push({
+      en: Date.now(),
+      tipo: tipo === "escalar_colegio" ? "crm" : "whatsapp",
+      texto:
+        tipo === "escalar_colegio"
+          ? `Agente de cobranza · ${quien}: sin pago tras 4 cobros CoDi → pasa al colegio`
+          : `WhatsApp a la familia de ${quien} (${tipo}): ${m?.texto ?? ""}`,
+      ok: tipo !== "escalar_colegio",
+    });
+  }
+
+  /** Demo: carga las familias ficticias con la colegiatura del mes siguiente. */
+  async iniciarColegiaturas(anio: number, mes: number): Promise<EstadoTablero> {
+    const t = await this.leer();
+    t.colegiaturas = planesDeEjemplo().map((p) => ({ ...nuevaColegiatura(p, anio, mes), demo: true }));
+    t.bitacora.push({ en: Date.now(), tipo: "crm", texto: `Agente de cobranza · ${t.colegiaturas.length} colegiaturas de ${mes}/${anio} en agenda`, ok: true });
+    await this.guardar(t);
+    return this.publico(t);
+  }
+
+  /** Demo: adelanta el reloj de una colegiatura a su siguiente paso y lo ejecuta. */
+  async avanzarColegiatura(id: string): Promise<{ colegiatura?: Colegiatura; paso?: string }> {
+    const t = await this.leer();
+    const i = t.colegiaturas.findIndex((c) => c.id === id);
+    if (i < 0) return {};
+    const r = await avanzar(t.colegiaturas[i]!, this.ejecutorCobranza(t));
+    t.colegiaturas[i] = r.colegiatura;
+    if (r.paso) this.anotarPaso(t, r.colegiatura, r.paso.tipo);
+    await this.guardar(t);
+    return { colegiatura: publica(r.colegiatura), paso: r.paso?.tipo };
+  }
+
+  /** La familia activó CoDi con la guía del agente de adopción. */
+  async activarCodiColegiatura(id: string): Promise<Colegiatura | undefined> {
+    const t = await this.leer();
+    const i = t.colegiaturas.findIndex((c) => c.id === id);
+    if (i < 0) return undefined;
+    t.colegiaturas[i] = activarCodi(t.colegiaturas[i]!);
+    t.bitacora.push({ en: Date.now(), tipo: "crm", texto: `Agente de adopción · la familia de ${t.colegiaturas[i]!.plan.alumno} ya tiene CoDi`, ok: true });
+    await this.guardar(t);
+    return publica(t.colegiaturas[i]!);
+  }
+
+  /** Demo: el último cobro de la colegiatura (para simular que la familia lo acepta). */
+  async ultimoCobroColegiatura(id: string) {
+    const c = (await this.leer()).colegiaturas.find((x) => x.id === id);
+    return c ? { pagada: c.pagada, cobro: c.cobros.at(-1) } : undefined;
+  }
+
+  private async aplicarPagoColegiatura(webhookId: string, pago: PagoRecibido): Promise<{ resultado: Resultado }> {
+    const t = await this.leer();
+    const id = pago.metadatos.colegiaturaId!;
+    if (t.webhooks.includes(webhookId)) return { resultado: { tipo: "duplicado", leadId: id } };
+    const i = t.colegiaturas.findIndex((c) => c.id === id);
+    const evento = pago.medio === "push" ? "codi.pn.payment_received" : "codi.qr.payment_received";
+    if (i < 0) {
+      t.bitacora.push({ en: Date.now(), tipo: "webhook", texto: `Webhook ${evento} · colegiatura desconocida`, ok: false });
+      await this.guardar(t);
+      return { resultado: { tipo: "sin_cobro" } };
+    }
+    const r = marcarPagada(t.colegiaturas[i]!, pago.referencia, pago.montoMXN, pago.pagadoEn);
+    t.webhooks.push(webhookId);
+    if (r.tipo === "no_coincide") {
+      t.bitacora.push({ en: Date.now(), tipo: "webhook", texto: `Webhook ${evento} · firma ✓ · colegiatura RECHAZADO (${r.motivo}) → revisión`, ok: false });
+      await this.guardar(t);
+      const esperado = t.colegiaturas[i]!.cobros.at(-1);
+      return {
+        resultado: {
+          tipo: "no_coincide",
+          leadId: id,
+          motivo: r.motivo,
+          esperado: { montoMXN: esperado?.montoMXN ?? 0, referencia: esperado?.referencia ?? "" },
+          recibido: { montoMXN: pago.montoMXN, referencia: pago.referencia },
+        },
+      };
+    }
+    t.colegiaturas[i] = r.colegiatura;
+    if (r.tipo === "conciliado") {
+      t.bitacora.push({
+        en: Date.now(),
+        tipo: "webhook",
+        texto: `Webhook ${evento} · firma ✓ · colegiatura de ${r.colegiatura.plan.alumno} pagada (${pesos(pago.montoMXN)}, ${r.colegiatura.pagadaCon}) · el agente deja de cobrar`,
+        ok: true,
+      });
+    }
+    await this.guardar(t);
+    return { resultado: { tipo: r.tipo, leadId: id } };
   }
 
   // ───────── agente facturador ─────────

@@ -2,6 +2,7 @@
  * Datos de DEMOSTRACIÓN. Todo es inventado: escuela, familias, montos y celular.
  */
 import type { Lead } from "./conciliacion.ts";
+import type { PlanColegiatura } from "./cobranza.ts";
 
 export const ESCUELA_DEMO = {
   nombre: "Colegio Aurora (demo)",
@@ -52,5 +53,18 @@ export function leadsDeEjemplo(): Lead[] {
         conciliadoEn: 0,
       },
     },
+  ];
+}
+
+/**
+ * Familias ficticias del agente de cobranza (colegiatura del mes). Una sin CoDi para
+ * que se vea entrar al agente de adopción. Mismo celular ficticio de la demo.
+ */
+export function planesDeEjemplo(): PlanColegiatura[] {
+  const base = { celular: CELULAR_DEMO, montoMXN: 4850, diaDePago: 5, descuentoProntoPagoMXN: 150 };
+  return [
+    { ...base, familiaId: "fam-navarro", alumno: "Sofía", codiActivo: true },
+    { ...base, familiaId: "fam-ibarra", alumno: "Mateo", codiActivo: false },
+    { ...base, familiaId: "fam-salas", alumno: "Lucía", codiActivo: true, montoMXN: 5200 },
   ];
 }
